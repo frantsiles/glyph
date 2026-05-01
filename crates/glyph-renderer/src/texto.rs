@@ -8,15 +8,17 @@
 //! ## Jerarquía de color por fragmento
 //!
 //! ```text
-//! 1. COLOR_TEXTO   (predeterminado)
+//! 1. COLOR_TEXTO      (predeterminado)
 //! 2. Span sintáctico  (tree-sitter)
-//! 3. Diagnóstico LSP  (sobreescribe sintaxis en su rango)
-//! 4. Cursor           (sobreescribe todo en su carácter)
+//! 3. Match inactivo   (búsqueda)
+//! 4. Match activo     (búsqueda — match seleccionado)
+//! 5. Diagnóstico LSP  (sobreescribe sintaxis y matches en su rango)
+//! 6. Cursor           (sobreescribe todo en su carácter)
 //! ```
 //!
 //! ## Algoritmo de barrido de fronteras
 //!
-//! Todos los extremos de spans, diagnósticos y cursor se convierten en
+//! Todos los extremos de spans, diagnósticos, matches y cursor se convierten en
 //! "fronteras". El texto queda partido en segmentos entre fronteras
 //! consecutivas. Cada segmento recibe el color de mayor prioridad que
 //! lo cubre. Esto garantiza corrección con cualquier combinación de
@@ -32,6 +34,11 @@ use crate::contenido::{ContenidoRender, CursorRender, DiagnosticoRender, Severid
 
 const COLOR_TEXTO: Color = Color::rgb(0xCC, 0xCC, 0xCC);
 const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xCC, 0x00);
+const COLOR_MATCH: Color = Color::rgb(0xFF, 0xCC, 0x00);
+const COLOR_MATCH_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);
+const COLOR_TEXTO_BARRA: Color = Color::rgb(0x98, 0xA0, 0xAD);
+
+const ALTURA_BARRA: f32 = 22.0;
 
 fn color_diagnostico(severidad: SeveridadRender) -> Color {
     match severidad {
@@ -42,14 +49,16 @@ fn color_diagnostico(severidad: SeveridadRender) -> Color {
     }
 }
 
-/// Encapsula el pipeline de renderizado de texto.
+/// Encapsula el pipeline de renderizado de texto (editor + barra de estado).
 pub struct RendererTexto {
     sistema_fuentes: FontSystem,
     cache_formas: SwashCache,
     atlas: TextAtlas,
     renderer: TextRenderer,
     buffer: Buffer,
+    buffer_barra: Buffer,
     metricas: Metrics,
+    metricas_barra: Metrics,
 }
 
 impl RendererTexto {
@@ -74,15 +83,20 @@ impl RendererTexto {
         let mut buffer = Buffer::new(&mut sistema_fuentes, metricas);
         buffer.set_size(&mut sistema_fuentes, 1280.0, 720.0);
 
-        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, metricas }
+        let metricas_barra = Metrics::new(13.0, ALTURA_BARRA);
+        let mut buffer_barra = Buffer::new(&mut sistema_fuentes, metricas_barra);
+        buffer_barra.set_size(&mut sistema_fuentes, 1280.0, ALTURA_BARRA);
+
+        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, buffer_barra, metricas, metricas_barra }
     }
 
     /// Actualiza el buffer de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
-        let Self { sistema_fuentes, buffer, metricas, .. } = self;
+        let Self { sistema_fuentes, buffer, buffer_barra, metricas, metricas_barra, .. } = self;
 
+        // — Editor principal —
         buffer.set_metrics(sistema_fuentes, *metricas);
-        buffer.set_size(sistema_fuentes, ancho, alto);
+        buffer.set_size(sistema_fuentes, ancho, (alto - ALTURA_BARRA).max(1.0));
 
         let texto = contenido.texto_completo();
         let cursor_byte = contenido.cursor.map(|c| cursor_byte_offset(&contenido.lineas, c));
@@ -90,6 +104,8 @@ impl RendererTexto {
         let fragmentos = construir_spans_glyphon(
             &texto,
             &contenido.spans,
+            &contenido.matches_busqueda,
+            contenido.match_activo,
             &contenido.diagnosticos,
             cursor_byte,
         );
@@ -99,6 +115,18 @@ impl RendererTexto {
 
         buffer.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
         buffer.shape_until_scroll(sistema_fuentes);
+
+        // — Barra de estado —
+        buffer_barra.set_metrics(sistema_fuentes, *metricas_barra);
+        buffer_barra.set_size(sistema_fuentes, ancho, ALTURA_BARRA);
+
+        let barra_attrs = Attrs::new().family(Family::Monospace).color(COLOR_TEXTO_BARRA);
+        buffer_barra.set_rich_text(
+            sistema_fuentes,
+            std::iter::once((contenido.barra_estado.as_str(), barra_attrs)),
+            Shaping::Advanced,
+        );
+        buffer_barra.shape_until_scroll(sistema_fuentes);
     }
 
     /// Prepara el atlas de glifos para el frame actual (antes del render pass).
@@ -111,7 +139,8 @@ impl RendererTexto {
     ) -> Result<()> {
         self.atlas.trim();
 
-        let Self { renderer, sistema_fuentes, atlas, buffer, cache_formas, .. } = self;
+        let alto_editor = (alto as i32) - ALTURA_BARRA as i32;
+        let Self { renderer, sistema_fuentes, atlas, buffer, buffer_barra, cache_formas, .. } = self;
 
         renderer
             .prepare(
@@ -120,19 +149,34 @@ impl RendererTexto {
                 sistema_fuentes,
                 atlas,
                 Resolution { width: ancho, height: alto },
-                [TextArea {
-                    buffer,
-                    left: 8.0,
-                    top: 8.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: ancho as i32,
-                        bottom: alto as i32,
+                [
+                    TextArea {
+                        buffer,
+                        left: 8.0,
+                        top: 8.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: ancho as i32,
+                            bottom: alto_editor,
+                        },
+                        default_color: COLOR_TEXTO,
                     },
-                    default_color: COLOR_TEXTO,
-                }],
+                    TextArea {
+                        buffer: buffer_barra,
+                        left: 8.0,
+                        top: alto as f32 - ALTURA_BARRA,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: alto_editor,
+                            right: ancho as i32,
+                            bottom: alto as i32,
+                        },
+                        default_color: COLOR_TEXTO_BARRA,
+                    },
+                ],
                 cache_formas,
             )
             .map_err(|e| anyhow!("glyphon prepare falló: {e:?}"))
@@ -154,20 +198,17 @@ impl RendererTexto {
 // ------------------------------------------------------------------
 
 /// Construye fragmentos `(texto, Attrs)` respetando la jerarquía de color:
-/// predeterminado < sintaxis < diagnóstico < cursor.
-///
-/// Garantiza corrección incluso con spans y diagnósticos solapados:
-/// todos los extremos se convierten en fronteras y cada segmento
-/// resultante recibe un único color según la prioridad más alta.
+/// predeterminado < sintaxis < match inactivo < match activo < diagnóstico < cursor.
 fn construir_spans_glyphon(
     texto: &str,
     spans: &[SpanTexto],
+    matches: &[(usize, usize)],
+    match_activo: Option<usize>,
     diagnosticos: &[DiagnosticoRender],
     cursor_byte: Option<usize>,
 ) -> Vec<(String, Attrs<'static>)> {
     let total = texto.len();
     if total == 0 {
-        // Texto vacío: solo muestra el cursor si lo hay
         if cursor_byte.is_some() {
             return vec![(
                 " ".to_string(),
@@ -188,6 +229,10 @@ fn construir_spans_glyphon(
         fronteras.push(d.inicio_byte.min(total));
         fronteras.push(d.fin_byte.min(total));
     }
+    for &(ini, fin) in matches {
+        fronteras.push(ini.min(total));
+        fronteras.push(fin.min(total));
+    }
     if let Some(cb) = cursor_byte {
         let cb = cb.min(total);
         fronteras.push(cb);
@@ -205,8 +250,7 @@ fn construir_spans_glyphon(
     fronteras.sort_unstable();
     fronteras.dedup();
 
-    // ── Paso 2: asignar color a cada segmento ────────────────────────────
-    // El rango del cursor (para comparaciones rápidas)
+    // ── Paso 2: precomputar rango del cursor ──────────────────────────────
     let cursor_range: Option<(usize, usize)> = cursor_byte.map(|cb| {
         let cb = cb.min(total);
         if cb < total {
@@ -218,10 +262,16 @@ fn construir_spans_glyphon(
                 .min(total);
             (cb, fin)
         } else {
-            (total, total) // marcador para cursor past-end
+            (total, total)
         }
     });
 
+    // Rango del match activo (para comparación rápida)
+    let rango_match_activo: Option<(usize, usize)> = match_activo
+        .and_then(|idx| matches.get(idx))
+        .copied();
+
+    // ── Paso 3: asignar color a cada segmento ─────────────────────────────
     let mut resultado: Vec<(String, Attrs<'static>)> = Vec::new();
 
     for w in fronteras.windows(2) {
@@ -230,10 +280,9 @@ fn construir_spans_glyphon(
             continue;
         }
 
-        // Punto representativo del segmento (siempre en su interior)
         let mid = seg_ini;
 
-        // Prioridad 4: cursor
+        // Prioridad 6: cursor
         let es_cursor = cursor_range
             .map(|(cs, ce)| mid >= cs && mid < ce)
             .unwrap_or(false);
@@ -246,7 +295,7 @@ fn construir_spans_glyphon(
             continue;
         }
 
-        // Prioridad 3: diagnóstico (último que cubre mid gana)
+        // Prioridad 5: diagnóstico (último que cubre mid gana)
         let color_diag = diagnosticos
             .iter()
             .rev()
@@ -257,6 +306,27 @@ fn construir_spans_glyphon(
             resultado.push((
                 texto[seg_ini..seg_fin].to_string(),
                 Attrs::new().family(Family::Monospace).color(color),
+            ));
+            continue;
+        }
+
+        // Prioridad 4: match activo
+        if let Some((ms, me)) = rango_match_activo {
+            if mid >= ms && mid < me {
+                resultado.push((
+                    texto[seg_ini..seg_fin].to_string(),
+                    Attrs::new().family(Family::Monospace).color(COLOR_MATCH_ACTIVO),
+                ));
+                continue;
+            }
+        }
+
+        // Prioridad 3: match inactivo
+        let es_match = matches.iter().any(|&(ms, me)| mid >= ms && mid < me);
+        if es_match {
+            resultado.push((
+                texto[seg_ini..seg_fin].to_string(),
+                Attrs::new().family(Family::Monospace).color(COLOR_MATCH),
             ));
             continue;
         }

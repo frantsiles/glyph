@@ -43,4 +43,19 @@ pub enum EventoEditor {
 
     /// Guardar el archivo actual (Ctrl+S)
     Guardar,
+
+    /// Activar modo búsqueda (Ctrl+F)
+    IniciarBusqueda,
+
+    /// El usuario actualizó el texto de búsqueda
+    ActualizarBusqueda(String),
+
+    /// Saltar al siguiente resultado (Enter en modo búsqueda)
+    SiguienteMatch,
+
+    /// Saltar al resultado anterior (Shift+Enter en modo búsqueda)
+    MatchAnterior,
+
+    /// Salir del modo búsqueda (Escape)
+    TerminarBusqueda,
 }

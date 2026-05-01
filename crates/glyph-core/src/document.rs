@@ -257,6 +257,34 @@ impl Document {
     }
 
     // ------------------------------------------------------------------
+    // Búsqueda
+    // ------------------------------------------------------------------
+
+    /// Busca todas las ocurrencias (no solapadas) de `consulta` en el buffer.
+    /// Devuelve rangos de bytes `(inicio, fin)` en el texto completo.
+    pub fn buscar(&self, consulta: &str) -> Vec<(usize, usize)> {
+        if consulta.is_empty() {
+            return vec![];
+        }
+        let texto = self.buffer.contenido_completo();
+        let mut matches = Vec::new();
+        let mut pos = 0;
+        while let Some(idx) = texto[pos..].find(consulta) {
+            let inicio = pos + idx;
+            let fin = inicio + consulta.len();
+            matches.push((inicio, fin));
+            pos = fin;
+        }
+        matches
+    }
+
+    /// Mueve el cursor principal a un byte offset del texto completo.
+    pub fn mover_cursor_a_byte(&mut self, byte: usize) {
+        let (linea, col) = self.buffer.byte_a_posicion(byte);
+        self.cursores[0].mover_a(linea, col, false);
+    }
+
+    // ------------------------------------------------------------------
     // Helpers privados
     // ------------------------------------------------------------------
 
@@ -343,5 +371,30 @@ mod tests {
         assert_eq!(doc.cursor_principal().posicion.columna, 10);
         doc.mover_cursor_inicio_linea();
         assert_eq!(doc.cursor_principal().posicion.columna, 0);
+    }
+
+    #[test]
+    fn test_buscar_multiples_ocurrencias() {
+        let doc = Document::desde_archivo("fn foo() { let foo = 1; }", PathBuf::from("f.rs"));
+        let matches = doc.buscar("foo");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], (3, 6));
+        assert_eq!(matches[1], (15, 18));
+    }
+
+    #[test]
+    fn test_buscar_sin_resultados() {
+        let doc = Document::desde_archivo("hola mundo", PathBuf::from("f.txt"));
+        assert!(doc.buscar("xyz").is_empty());
+        assert!(doc.buscar("").is_empty());
+    }
+
+    #[test]
+    fn test_mover_cursor_a_byte() {
+        let mut doc = Document::desde_archivo("ab\ncd\nef", PathBuf::from("f.txt"));
+        doc.mover_cursor_a_byte(4); // 'c' en línea 1, col 1
+        let pos = doc.cursor_principal().posicion;
+        assert_eq!(pos.linea, 1);
+        assert_eq!(pos.columna, 1);
     }
 }

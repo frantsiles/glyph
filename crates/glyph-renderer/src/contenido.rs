@@ -80,6 +80,15 @@ pub struct ContenidoRender {
 
     /// Diagnósticos LSP — sobreescriben el color de sintaxis en su rango
     pub diagnosticos: Vec<DiagnosticoRender>,
+
+    /// Matches de búsqueda como rangos de bytes — vacío si no hay búsqueda activa
+    pub matches_busqueda: Vec<(usize, usize)>,
+
+    /// Índice del match actualmente seleccionado en `matches_busqueda`
+    pub match_activo: Option<usize>,
+
+    /// Texto a mostrar en la barra de estado inferior
+    pub barra_estado: String,
 }
 
 impl ContenidoRender {
@@ -91,6 +100,9 @@ impl ContenidoRender {
             tamano_fuente: 16.0,
             spans: Vec::new(),
             diagnosticos: Vec::new(),
+            matches_busqueda: Vec::new(),
+            match_activo: None,
+            barra_estado: String::new(),
         }
     }
 

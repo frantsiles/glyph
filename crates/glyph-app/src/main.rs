@@ -11,17 +11,6 @@
 //! glyph                  # abre un buffer vacío
 //! glyph archivo.rs       # abre un archivo existente (o crea uno nuevo)
 //! ```
-//!
-//! ## Capas
-//!
-//! ```text
-//! glyph-core        — Document, Buffer, Cursor, Resaltador
-//! glyph-lsp         — ClienteLsp (hilo tokio independiente)
-//! glyph-plugin-host — HostPlugins: carga y ejecuta plugins Lua
-//! plugin-theme      — script Lua con el tema One Dark
-//! glyph-app         — orquesta todo, sin conocer detalles internos de cada capa
-//! glyph-renderer    — ventana GPU, event loop winit
-//! ```
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,7 +30,6 @@ use glyph_renderer::{
 use tokio::sync::mpsc as tokio_mpsc;
 
 fn main() -> Result<()> {
-    // ── Logging ──────────────────────────────────────────────────────────
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -51,10 +39,8 @@ fn main() -> Result<()> {
 
     tracing::info!("Glyph — Every character matters");
 
-    // ── Argumento de archivo ──────────────────────────────────────────────
     let ruta_archivo: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
 
-    // ── Cargar documento ──────────────────────────────────────────────────
     let mut documento = if let Some(ref ruta) = ruta_archivo {
         if ruta.exists() {
             let contenido = std::fs::read_to_string(ruta)?;
@@ -77,19 +63,15 @@ fn main() -> Result<()> {
     host.inicializar();
     host.al_abrir(ruta_archivo.as_ref().and_then(|p| p.to_str()));
 
-    // ── Resaltador + lenguaje ─────────────────────────────────────────────
     let resaltador = Resaltador::nuevo();
     let lenguaje = lenguaje_del_doc(&ruta_archivo);
 
-    // ── Diagnósticos compartidos entre hilo LSP y event loop ─────────────
     let diagnosticos_compartidos: Arc<Mutex<Vec<Diagnostic>>> =
         Arc::new(Mutex::new(Vec::new()));
     let diag_escritor = Arc::clone(&diagnosticos_compartidos);
 
-    // ── Canal LSP: cambios del editor → hilo LSP ─────────────────────────
     let (tx_lsp, rx_lsp) = tokio_mpsc::unbounded_channel::<(Url, String, i32)>();
 
-    // ── Hilo LSP ──────────────────────────────────────────────────────────
     if let Some(ref ruta) = ruta_archivo {
         let ruta_lsp = ruta.canonicalize().unwrap_or_else(|_| ruta.clone());
         let uri = Url::from_file_path(&ruta_lsp).ok();
@@ -105,23 +87,37 @@ fn main() -> Result<()> {
         });
     }
 
-    // ── Versión del documento ─────────────────────────────────────────────
     let version_doc = Arc::new(AtomicI32::new(1));
 
-    // ── Contenido inicial ─────────────────────────────────────────────────
+    let nombre_archivo: Option<String> = ruta_archivo
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+
+    let barra_inicial = construir_barra_estado(
+        &documento,
+        nombre_archivo.as_deref(),
+        false,
+        "",
+        &[],
+        0,
+        0,
+    );
+
     let contenido_inicial = documento_a_contenido(
         &documento,
         &resaltador,
         lenguaje,
         &host,
         &diagnosticos_compartidos.lock().unwrap(),
+        vec![],
+        None,
+        barra_inicial,
     );
 
-    // ── Título de ventana ─────────────────────────────────────────────────
-    let titulo = ruta_archivo
+    let titulo = nombre_archivo
         .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| format!("{} — Glyph", n.to_string_lossy()))
+        .map(|n| format!("{n} — Glyph"))
         .unwrap_or_else(|| "Sin título — Glyph".to_string());
 
     let config = ConfigRenderer {
@@ -129,7 +125,6 @@ fn main() -> Result<()> {
         ..ConfigRenderer::default()
     };
 
-    // ── URI del documento para el LSP ─────────────────────────────────────
     let uri_doc: Option<Url> = ruta_archivo
         .as_ref()
         .and_then(|r| r.canonicalize().ok())
@@ -140,7 +135,12 @@ fn main() -> Result<()> {
         .and_then(|p| p.to_str())
         .map(|s| s.to_string());
 
-    // ── Event loop ────────────────────────────────────────────────────────
+    // ── Estado de búsqueda (vive en el closure del event loop) ────────────
+    let mut en_busqueda = false;
+    let mut consulta_actual = String::new();
+    let mut matches_actuales: Vec<(usize, usize)> = Vec::new();
+    let mut match_activo: usize = 0;
+
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
         let modifica_texto = matches!(
             evento,
@@ -157,17 +157,30 @@ fn main() -> Result<()> {
                     tracing::error!("Error insertando texto: {e}");
                     return None;
                 }
+                // Actualizar matches si hay búsqueda activa
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                }
             }
             EventoEditor::BorrarAtras => {
                 if let Err(e) = documento.borrar_antes_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
                 }
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                }
             }
             EventoEditor::BorrarAdelante => {
                 if let Err(e) = documento.borrar_despues_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
+                }
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
                 }
             }
             EventoEditor::MoverCursor(direccion) => match direccion {
@@ -183,11 +196,19 @@ fn main() -> Result<()> {
                     tracing::error!("Error al deshacer: {e}");
                     return None;
                 }
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                }
             }
             EventoEditor::Rehacer => {
                 if let Err(e) = documento.rehacer() {
                     tracing::error!("Error al rehacer: {e}");
                     return None;
+                }
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
                 }
             }
             EventoEditor::Guardar => {
@@ -208,6 +229,44 @@ fn main() -> Result<()> {
                 }
                 return None;
             }
+
+            // ── Búsqueda ──────────────────────────────────────────────
+            EventoEditor::IniciarBusqueda => {
+                en_busqueda = true;
+                consulta_actual.clear();
+                matches_actuales.clear();
+                match_activo = 0;
+            }
+            EventoEditor::ActualizarBusqueda(consulta) => {
+                consulta_actual = consulta;
+                matches_actuales = documento.buscar(&consulta_actual);
+                match_activo = 0;
+                if let Some(&(ini, _)) = matches_actuales.first() {
+                    documento.mover_cursor_a_byte(ini);
+                }
+            }
+            EventoEditor::SiguienteMatch => {
+                if !matches_actuales.is_empty() {
+                    match_activo = (match_activo + 1) % matches_actuales.len();
+                    let (ini, _) = matches_actuales[match_activo];
+                    documento.mover_cursor_a_byte(ini);
+                }
+            }
+            EventoEditor::MatchAnterior => {
+                if !matches_actuales.is_empty() {
+                    match_activo = match_activo
+                        .checked_sub(1)
+                        .unwrap_or(matches_actuales.len() - 1);
+                    let (ini, _) = matches_actuales[match_activo];
+                    documento.mover_cursor_a_byte(ini);
+                }
+            }
+            EventoEditor::TerminarBusqueda => {
+                en_busqueda = false;
+                consulta_actual.clear();
+                matches_actuales.clear();
+                match_activo = 0;
+            }
         }
 
         // Notificar cambio al LSP y al plugin host
@@ -220,8 +279,40 @@ fn main() -> Result<()> {
             }
         }
 
+        let n_errores = {
+            let diags = diagnosticos_compartidos.lock().unwrap();
+            diags.iter().filter(|d| d.severity == Some(DiagnosticSeverity::ERROR)).count()
+        };
+
+        let barra = construir_barra_estado(
+            &documento,
+            nombre_archivo.as_deref(),
+            en_busqueda,
+            &consulta_actual,
+            &matches_actuales,
+            match_activo,
+            n_errores,
+        );
+
+        let (m_busqueda, m_activo) = if en_busqueda && !matches_actuales.is_empty() {
+            (matches_actuales.clone(), Some(match_activo))
+        } else if en_busqueda {
+            (vec![], None)
+        } else {
+            (vec![], None)
+        };
+
         let diags = diagnosticos_compartidos.lock().unwrap();
-        Some(documento_a_contenido(&documento, &resaltador, lenguaje, &host, &diags))
+        Some(documento_a_contenido(
+            &documento,
+            &resaltador,
+            lenguaje,
+            &host,
+            &diags,
+            m_busqueda,
+            m_activo,
+            barra,
+        ))
     })
 }
 
@@ -298,6 +389,9 @@ fn documento_a_contenido(
     lenguaje: Lenguaje,
     host: &HostPlugins,
     diagnosticos_lsp: &[Diagnostic],
+    matches_busqueda: Vec<(usize, usize)>,
+    match_activo: Option<usize>,
+    barra_estado: String,
 ) -> ContenidoRender {
     let cursor = doc.cursor_principal();
     let texto_completo = doc.buffer.contenido_completo();
@@ -311,7 +405,6 @@ fn documento_a_contenido(
         lineas
     };
 
-    // Sintaxis con colores del tema activo en el host
     let spans: Vec<SpanTexto> = resaltador
         .resaltar(&texto_completo, lenguaje)
         .into_iter()
@@ -322,7 +415,6 @@ fn documento_a_contenido(
         })
         .collect();
 
-    // Diagnósticos LSP → byte positions
     let diagnosticos: Vec<DiagnosticoRender> = diagnosticos_lsp
         .iter()
         .map(|d| {
@@ -353,11 +445,53 @@ fn documento_a_contenido(
         tamano_fuente: 16.0,
         spans,
         diagnosticos,
+        matches_busqueda,
+        match_activo,
+        barra_estado,
     }
 }
 
 // ------------------------------------------------------------------
-// Tema — usa colores del HostPlugins en lugar de valores hardcodeados
+// Barra de estado
+// ------------------------------------------------------------------
+
+fn construir_barra_estado(
+    doc: &Document,
+    nombre_archivo: Option<&str>,
+    en_busqueda: bool,
+    consulta: &str,
+    matches: &[(usize, usize)],
+    match_activo: usize,
+    n_errores: usize,
+) -> String {
+    if en_busqueda {
+        if matches.is_empty() {
+            if consulta.is_empty() {
+                "Buscar: _ | Enter: siguiente, Esc: salir".to_string()
+            } else {
+                format!("Buscar: \"{consulta}\" — sin resultados | Esc: salir")
+            }
+        } else {
+            format!(
+                "Buscar: \"{consulta}\" — {}/{} | Enter: siguiente, Shift+Enter: anterior, Esc: salir",
+                match_activo + 1,
+                matches.len()
+            )
+        }
+    } else {
+        let nombre = nombre_archivo.unwrap_or("Sin título");
+        let pos = doc.cursor_principal().posicion;
+        let errores = if n_errores > 0 {
+            format!(" | {n_errores} error(es) LSP")
+        } else {
+            String::new()
+        };
+        format!("{nombre} | Ln {}, Col {}{}", pos.linea + 1, pos.columna + 1, errores)
+    }
+}
+
+// ------------------------------------------------------------------
+// Tema — usa colores del HostPlugins
 // ------------------------------------------------------------------
 
 fn tipo_a_color(tipo: TipoResaltado, host: &HostPlugins) -> ColorRender {

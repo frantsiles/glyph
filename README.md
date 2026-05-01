@@ -6,7 +6,7 @@ Editor de código nativo construido en Rust: renderizado GPU, syntax highlightin
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
-![Status](https://img.shields.io/badge/status-milestone%202%20completo-green.svg)
+![Status](https://img.shields.io/badge/status-milestone%203%20avanzado-green.svg)
 
 ---
 
@@ -70,13 +70,11 @@ El núcleo del editor. Contiene:
 
 Toda la lógica de presentación. No importa ningún tipo de `glyph-core`.
 
-- **`ContenidoRender`** — DTO (*Data Transfer Object*) que `glyph-app` construye a partir del `Document` y pasa al renderer. Contiene líneas de texto, posición del cursor y `Vec<SpanTexto>` (spans con `ColorRender` ya resuelto). Esta separación permite cambiar la representación interna del core sin tocar el renderer y viceversa.
+- **`ContenidoRender`** — DTO (*Data Transfer Object*) que `glyph-app` construye a partir del `Document` y pasa al renderer. Contiene líneas de texto, posición del cursor, `Vec<SpanTexto>` (spans con `ColorRender` ya resuelto), `Vec<DiagnosticoRender>`, `matches_busqueda: Vec<(usize, usize)>`, `match_activo: Option<usize>` y `barra_estado: String`.
 - **`ContextoGpu`** — inicializa `wgpu` (instancia, adaptador, dispositivo, superficie). La ventana vive en un `Arc<Window>` para que `Surface<'static>` sea válida.
-- **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Soporta dos modos:
-  - *Plain*: texto monocolor con cursor overlay amarillo.
-  - *Highlighted*: construye segmentos `(str_slice, Attrs)` a partir de los spans semánticos, superpone el cursor cortando el span que lo contenga.
-- **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Emite `EventoEditor` al manejador de la app en cada evento de teclado relevante.
-- **`EventoEditor`** — enum que describe la intención del usuario: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. El renderer no sabe nada de edición; solo detecta teclas y delega.
+- **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Mantiene dos buffers glyphon: uno para el editor (toda el área menos la barra inferior) y otro para la barra de estado (últimos 22px). Usa un algoritmo de **barrido de fronteras** para asignar colores por prioridad: `COLOR_TEXTO` < sintaxis < match inactivo < match activo < diagnóstico < cursor.
+- **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Gestiona dos modos internos (`Normal` y `Busqueda`) para enrutar las teclas correctamente: en modo búsqueda los caracteres actualizan la consulta en lugar de insertarse en el documento. Emite `EventoEditor` al manejador de la app.
+- **`EventoEditor`** — enum que describe la intención del usuario. Variantes de edición: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. Variantes de búsqueda: `IniciarBusqueda`, `ActualizarBusqueda(String)`, `SiguienteMatch`, `MatchAnterior`, `TerminarBusqueda`.
 
 ### glyph-lsp
 
@@ -189,11 +187,22 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 | `Ctrl+S` | Guardar |
 | `Ctrl+Z` | Deshacer |
 | `Ctrl+Y` | Rehacer |
+| `Ctrl+F` | Activar búsqueda |
 | `Tab` | Insertar 4 espacios |
 | `Flechas` | Mover cursor |
 | `Inicio` / `Fin` | Inicio / fin de línea |
 | `Supr` | Borrar carácter adelante |
 | `Backspace` | Borrar carácter atrás |
+
+**Búsqueda (Ctrl+F):**
+
+| Tecla | Acción |
+|---|---|
+| Caracteres | Actualizar consulta |
+| `Enter` | Siguiente resultado |
+| `Shift+Enter` | Resultado anterior |
+| `Backspace` | Borrar último carácter de la consulta |
+| `Escape` | Salir de búsqueda |
 
 ---
 
@@ -221,11 +230,12 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Tema One Dark como plugin Lua (`plugin-theme/init.lua`)
 - [x] Diagnósticos LSP inline en el renderer (color overlay por severidad)
 - [x] Conversión UTF-16 → byte para posiciones LSP
+- [x] Búsqueda en buffer (Ctrl+F) con navegación entre resultados
+- [x] Barra de estado: nombre de archivo, posición del cursor, errores LSP y estado de búsqueda
 - [ ] Sistema de permisos declarativo por plugin
 - [ ] Plugin host WASM con `wasmtime`
 - [ ] WIT API v1 — contratos para plugins compilados
 - [ ] Popup de hover en el renderer
-- [ ] Búsqueda y reemplazo en buffer
 
 ### Milestone 4 — Plugin System avanzado + IA
 - [ ] Plugin host WASM con `wasmtime` (sandboxed, cualquier lenguaje)

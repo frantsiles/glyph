@@ -12,20 +12,32 @@
 //! provisto por `glyph-app`. Si el manejador devuelve `Some(nuevo_contenido)`,
 //! el renderer actualiza la pantalla. El renderer no conoce `glyph-core`.
 //!
+//! ## Modos del renderer
+//!
+//! - **Normal**: edición de texto estándar.
+//! - **Busqueda**: Ctrl+F activa este modo. Las teclas alimentan la consulta de búsqueda
+//!   en lugar de insertarse en el documento. Escape vuelve al modo Normal.
+//!
 //! ## Teclas soportadas
 //!
-//! | Tecla           | Evento             |
-//! |---|---|
-//! | Caracteres      | InsertarTexto      |
-//! | Enter           | InsertarTexto("\n")|
-//! | Tab             | InsertarTexto("    ") — 4 espacios |
-//! | Backspace       | BorrarAtras        |
-//! | Delete          | BorrarAdelante     |
-//! | Flechas         | MoverCursor        |
-//! | Home / End      | InicioLinea / FinLinea |
-//! | Ctrl+S          | Guardar            |
-//! | Ctrl+Z          | Deshacer           |
-//! | Ctrl+Y          | Rehacer            |
+//! | Tecla           | Modo     | Evento                    |
+//! |---|---|---|
+//! | Caracteres      | Normal   | InsertarTexto             |
+//! | Enter           | Normal   | InsertarTexto("\n")       |
+//! | Tab             | Normal   | InsertarTexto("    ")     |
+//! | Backspace       | Normal   | BorrarAtras               |
+//! | Delete          | Normal   | BorrarAdelante            |
+//! | Flechas         | Normal   | MoverCursor               |
+//! | Home / End      | Normal   | InicioLinea / FinLinea    |
+//! | Ctrl+S          | Normal   | Guardar                   |
+//! | Ctrl+Z          | Normal   | Deshacer                  |
+//! | Ctrl+Y          | Normal   | Rehacer                   |
+//! | Ctrl+F          | Normal   | IniciarBusqueda           |
+//! | Caracteres      | Búsqueda | ActualizarBusqueda        |
+//! | Backspace       | Búsqueda | ActualizarBusqueda        |
+//! | Enter           | Búsqueda | SiguienteMatch            |
+//! | Shift+Enter     | Búsqueda | MatchAnterior             |
+//! | Escape          | Búsqueda | TerminarBusqueda          |
 
 use std::sync::Arc;
 
@@ -46,6 +58,12 @@ use crate::{
     texto::RendererTexto,
 };
 
+#[derive(Debug, PartialEq, Eq)]
+enum ModoRenderer {
+    Normal,
+    Busqueda,
+}
+
 /// Renderer principal — encapsula config + contenido inicial.
 pub struct Renderer {
     config: ConfigRenderer,
@@ -58,9 +76,6 @@ impl Renderer {
     }
 
     /// Inicia el event loop. Bloquea hasta que el usuario cierra la ventana.
-    ///
-    /// `manejador` recibe cada `EventoEditor` y devuelve `Some(ContenidoRender)`
-    /// si el contenido cambió, o `None` si no hay nada que redibujar.
     pub fn ejecutar<F>(self, mut manejador: F) -> Result<()>
     where
         F: FnMut(EventoEditor) -> Option<ContenidoRender> + 'static,
@@ -92,10 +107,10 @@ impl Renderer {
             config.tamano_fuente
         );
 
-        // Estado de modificadores (Ctrl, Shift, etc.)
         let mut mods = ModifiersState::default();
-        // Contenido mutable dentro del closure
         let mut contenido = contenido;
+        let mut modo = ModoRenderer::Normal;
+        let mut consulta = String::new();
 
         window.request_redraw();
 
@@ -105,13 +120,11 @@ impl Renderer {
             match event {
                 Event::WindowEvent { event, window_id } if window_id == window.id() => {
                     match event {
-                        // ── Cierre ──────────────────────────────────────
                         WindowEvent::CloseRequested => {
                             tracing::info!("Ventana cerrada — saliendo");
                             elwt.exit();
                         }
 
-                        // ── Redimensionar ────────────────────────────────
                         WindowEvent::Resized(nuevo_tamaño) => {
                             gpu.redimensionar(nuevo_tamaño.width, nuevo_tamaño.height);
                             window.request_redraw();
@@ -123,16 +136,26 @@ impl Renderer {
                             window.request_redraw();
                         }
 
-                        // ── Modificadores (Ctrl, Shift…) ─────────────────
                         WindowEvent::ModifiersChanged(nuevos_mods) => {
                             mods = nuevos_mods.state();
                         }
 
-                        // ── Teclado ──────────────────────────────────────
                         WindowEvent::KeyboardInput { event: ev, .. }
                             if ev.state == ElementState::Pressed =>
                         {
-                            let evento_opt = resolver_evento(&ev.logical_key, ev.text.as_deref(), mods);
+                            let key = &ev.logical_key;
+                            let text = ev.text.as_deref();
+
+                            let evento_opt = if modo == ModoRenderer::Busqueda {
+                                procesar_tecla_busqueda(key, text, mods, &mut modo, &mut consulta)
+                            } else {
+                                let opt = resolver_evento(key, text, mods);
+                                if matches!(opt, Some(EventoEditor::IniciarBusqueda)) {
+                                    modo = ModoRenderer::Busqueda;
+                                    consulta.clear();
+                                }
+                                opt
+                            };
 
                             if let Some(evento) = evento_opt {
                                 if let Some(nuevo) = manejador(evento) {
@@ -142,7 +165,6 @@ impl Renderer {
                             }
                         }
 
-                        // ── Dibujar ──────────────────────────────────────
                         WindowEvent::RedrawRequested => {
                             renderizar_frame(&window, &mut gpu, &mut texto, &contenido);
                         }
@@ -160,36 +182,67 @@ impl Renderer {
 }
 
 // ------------------------------------------------------------------
-// Traducción de teclas → EventoEditor
+// Procesado de teclas en modo búsqueda
 // ------------------------------------------------------------------
 
-/// Convierte un `Key` de winit en un `EventoEditor`, teniendo en cuenta modificadores.
-/// Devuelve `None` para teclas que el editor no procesa (F-keys, etc.).
+fn procesar_tecla_busqueda(
+    key: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+    modo: &mut ModoRenderer,
+    consulta: &mut String,
+) -> Option<EventoEditor> {
+    if mods.control_key() {
+        return None;
+    }
+    match key {
+        Key::Named(NamedKey::Escape) => {
+            *modo = ModoRenderer::Normal;
+            consulta.clear();
+            Some(EventoEditor::TerminarBusqueda)
+        }
+        Key::Named(NamedKey::Enter) if mods.shift_key() => Some(EventoEditor::MatchAnterior),
+        Key::Named(NamedKey::Enter) => Some(EventoEditor::SiguienteMatch),
+        Key::Named(NamedKey::Backspace) => {
+            consulta.pop();
+            Some(EventoEditor::ActualizarBusqueda(consulta.clone()))
+        }
+        _ => text
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                consulta.push_str(t);
+                EventoEditor::ActualizarBusqueda(consulta.clone())
+            }),
+    }
+}
+
+// ------------------------------------------------------------------
+// Traducción de teclas → EventoEditor (modo Normal)
+// ------------------------------------------------------------------
+
 fn resolver_evento(
     key: &Key,
     text: Option<&str>,
     mods: ModifiersState,
 ) -> Option<EventoEditor> {
-    // ── Atajos con Ctrl ─────────────────────────────────────────────
     if mods.control_key() {
         return match key {
             Key::Character(c) => match c.as_str() {
                 "s" | "S" => Some(EventoEditor::Guardar),
                 "z" | "Z" => Some(EventoEditor::Deshacer),
                 "y" | "Y" => Some(EventoEditor::Rehacer),
+                "f" | "F" => Some(EventoEditor::IniciarBusqueda),
                 _ => None,
             },
             _ => None,
         };
     }
 
-    // ── Teclas nombradas ─────────────────────────────────────────────
     match key {
         Key::Named(NamedKey::Enter) => {
             return Some(EventoEditor::InsertarTexto("\n".to_string()));
         }
         Key::Named(NamedKey::Tab) => {
-            // 4 espacios — configurable vía Lua en Milestone 3
             return Some(EventoEditor::InsertarTexto("    ".to_string()));
         }
         Key::Named(NamedKey::Backspace) => return Some(EventoEditor::BorrarAtras),
@@ -215,8 +268,6 @@ fn resolver_evento(
         _ => {}
     }
 
-    // ── Texto imprimible ─────────────────────────────────────────────
-    // `text` ya maneja dead keys, compose y el layout del teclado del usuario
     text.filter(|t| !t.is_empty())
         .map(|t| EventoEditor::InsertarTexto(t.to_string()))
 }

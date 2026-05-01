@@ -128,6 +128,15 @@ impl Buffer {
         Ok((linea, columna))
     }
 
+    /// Convierte un byte offset del texto completo a (línea, columna) en caracteres Unicode.
+    pub fn byte_a_posicion(&self, byte: usize) -> (usize, usize) {
+        let byte = byte.min(self.rope.len_bytes());
+        let char_idx = self.rope.byte_to_char(byte);
+        let linea = self.rope.char_to_line(char_idx);
+        let inicio_linea = self.rope.line_to_char(linea);
+        (linea, char_idx - inicio_linea)
+    }
+
     /// Extrae un rango de texto como String
     pub fn rango_texto(&self, inicio: usize, fin: usize) -> String {
         self.rope.slice(inicio..fin).to_string()
