@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/glyph-core",
+    "crates/glyph-renderer",
+    "crates/glyph-lsp",
+    "crates/glyph-plugin-host",
+    "crates/glyph-plugin-api",
+    "crates/glyph-app",
+    # Plugins oficiales
+    "plugins/plugin-theme",
+    "plugins/plugin-git",
+    "plugins/plugin-formatter",
+]
+
+# ==============================================================
+# Dependencias compartidas en todo el workspace
+# Definidas aquí una vez, cada crate las hereda sin versión
+# ==============================================================
+[workspace.dependencies]
+# Async runtime
+tokio        = { version = "1", features = ["full"] }
+
+# Serialización
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+toml         = "0.8"
+
+# Logging y errores
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow       = "1"
+thiserror    = "1"
+
+# Buffer de texto (estructura de datos principal del editor)
+ropey        = "1.6"
+
+# Syntax highlighting
+tree-sitter  = "0.22"
+
+# WASM runtime para plugins
+wasmtime     = { version = "20", features = ["async", "component-model"] }
+
+# Scripting Lua para plugins simples
+mlua         = { version = "0.9", features = ["lua54", "async", "send", "vendored"] }
+
+# Renderizado GPU
+wgpu         = "0.19"
+winit        = "0.29"
+
+# UI framework
+iced         = { version = "0.12", features = ["async-std", "image", "svg"] }
+
+# Renderizado de texto profesional (RTL, ligaduras, unicode)
+cosmic-text  = "0.11"
+
+# LSP
+tower-lsp    = "0.20"
+lsp-types    = "0.95"
+
+# Utilidades
+uuid         = { version = "1", features = ["v4"] }
+chrono       = { version = "0.4", features = ["serde"] }
+dirs         = "5"
+notify       = "6"                  # file watcher
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+authors      = ["Franz <frantsiles@github.com>"]
+license      = "Apache-2.0"
+repository   = "https://github.com/frantsiles/glyph"
+rust-version = "1.75"
+
+[profile.dev]
+opt-level    = 1                    # algo de optimización en dev para que no sea lentísimo
+
+[profile.release]
+opt-level    = 3
+lto          = true                 # link-time optimization
+codegen-units = 1                   # mejor optimización, más lento de compilar
+strip        = true                 # binario más pequeño
