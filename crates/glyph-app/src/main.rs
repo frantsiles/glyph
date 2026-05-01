@@ -18,11 +18,16 @@
 //! - Cargar el archivo desde la CLI (o crear buffer vacío)
 //! - Traducir `EventoEditor` → operaciones en `Document` → `ContenidoRender`
 //! - Guardar el archivo en disco (el core no tiene I/O)
+//! - Aplicar el tema de colores (One Dark) sobre los spans del resaltador
 
 use anyhow::Result;
-use glyph_core::Document;
+use glyph_core::{
+    resaltado::{Lenguaje, Resaltador, TipoResaltado},
+    Document,
+};
 use glyph_renderer::{
-    ConfigRenderer, ContenidoRender, CursorRender, DireccionCursor, EventoEditor,
+    ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DireccionCursor, EventoEditor,
+    SpanTexto,
 };
 use std::path::PathBuf;
 
@@ -55,8 +60,12 @@ fn main() -> Result<()> {
         Document::nuevo()
     };
 
+    // ── Resaltador + lenguaje ─────────────────────────────────────────────
+    let resaltador = Resaltador::nuevo();
+    let lenguaje = lenguaje_del_doc(&ruta_archivo);
+
     // ── Contenido inicial ─────────────────────────────────────────────────
-    let contenido_inicial = documento_a_contenido(&documento);
+    let contenido_inicial = documento_a_contenido(&documento, &resaltador, lenguaje);
 
     // ── Título de ventana con nombre de archivo ───────────────────────────
     let titulo = ruta_archivo
@@ -71,8 +80,6 @@ fn main() -> Result<()> {
     };
 
     // ── Event loop ────────────────────────────────────────────────────────
-    // El manejador vive aquí y captura `documento` por move.
-    // Es el único punto donde glyph-core y glyph-renderer se tocan.
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
         match evento {
             // ── Inserción ──────────────────────────────────────────────
@@ -127,7 +134,6 @@ fn main() -> Result<()> {
 
             // ── Guardar ────────────────────────────────────────────────
             EventoEditor::Guardar => {
-                // Clonar la ruta para liberar el borrow antes de llamar marcar_guardado()
                 let ruta = documento.buffer.ruta.clone();
                 match ruta {
                     Some(ruta) => {
@@ -142,12 +148,11 @@ fn main() -> Result<()> {
                     }
                     None => tracing::warn!("Sin ruta — abre un archivo con: glyph <archivo>"),
                 }
-                return None; // guardar no necesita redibujado
+                return None;
             }
         }
 
-        // Cualquier cambio en el documento produce nuevo contenido para el renderer
-        Some(documento_a_contenido(&documento))
+        Some(documento_a_contenido(&documento, &resaltador, lenguaje))
     })
 }
 
@@ -156,26 +161,33 @@ fn main() -> Result<()> {
 // ------------------------------------------------------------------
 
 /// Único punto de contacto entre glyph-core y glyph-renderer.
-///
-/// Construye el DTO que el renderer necesita sin exponer tipos del core.
-fn documento_a_contenido(doc: &Document) -> ContenidoRender {
+fn documento_a_contenido(
+    doc: &Document,
+    resaltador: &Resaltador,
+    lenguaje: Lenguaje,
+) -> ContenidoRender {
     let cursor = doc.cursor_principal();
-    let lineas: Vec<String> = doc
-        .buffer
-        .contenido_completo()
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
+    let texto_completo = doc.buffer.contenido_completo();
 
-    // Si el documento termina en \n, lines() omite la línea vacía final.
-    // La agregamos para que el cursor pueda posicionarse en ella.
-    let lineas = if doc.buffer.contenido_completo().ends_with('\n') {
+    let lineas: Vec<String> = texto_completo.lines().map(|l| l.to_string()).collect();
+
+    let lineas = if texto_completo.ends_with('\n') {
         let mut v = lineas;
         v.push(String::new());
         v
     } else {
         lineas
     };
+
+    let spans: Vec<SpanTexto> = resaltador
+        .resaltar(&texto_completo, lenguaje)
+        .into_iter()
+        .map(|s| SpanTexto {
+            inicio_byte: s.inicio_byte,
+            fin_byte: s.fin_byte,
+            color: tipo_a_color(s.tipo),
+        })
+        .collect();
 
     ContenidoRender {
         lineas,
@@ -184,5 +196,39 @@ fn documento_a_contenido(doc: &Document) -> ContenidoRender {
             columna: cursor.posicion.columna as u32,
         }),
         tamano_fuente: 16.0,
+        spans,
     }
+}
+
+// ------------------------------------------------------------------
+// Tema One Dark
+// ------------------------------------------------------------------
+
+fn tipo_a_color(tipo: TipoResaltado) -> ColorRender {
+    match tipo {
+        TipoResaltado::PalabraClave   => ColorRender::rgb(0xC6, 0x78, 0xDD), // morado
+        TipoResaltado::CadenaTexto    => ColorRender::rgb(0x98, 0xC3, 0x79), // verde
+        TipoResaltado::Comentario     => ColorRender::rgb(0x5C, 0x63, 0x70), // gris
+        TipoResaltado::Funcion        => ColorRender::rgb(0x61, 0xAF, 0xEF), // azul
+        TipoResaltado::Tipo           => ColorRender::rgb(0xE5, 0xC0, 0x7B), // amarillo
+        TipoResaltado::Numero         => ColorRender::rgb(0xD1, 0x9A, 0x66), // naranja
+        TipoResaltado::Operador       => ColorRender::rgb(0x56, 0xB6, 0xC2), // cian
+        TipoResaltado::Variable       => ColorRender::rgb(0xE0, 0x6C, 0x75), // rojo
+        TipoResaltado::Constante      => ColorRender::rgb(0xD1, 0x9A, 0x66), // naranja
+        TipoResaltado::Puntuacion     => ColorRender::rgb(0xAB, 0xB2, 0xBF), // gris claro
+        TipoResaltado::Atributo       => ColorRender::rgb(0xE5, 0xC0, 0x7B), // amarillo
+        TipoResaltado::Predeterminado => ColorRender::rgb(0xAB, 0xB2, 0xBF), // gris claro
+    }
+}
+
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
+
+fn lenguaje_del_doc(ruta: &Option<PathBuf>) -> Lenguaje {
+    ruta.as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(Lenguaje::desde_extension)
+        .unwrap_or(Lenguaje::Desconocido)
 }

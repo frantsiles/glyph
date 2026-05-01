@@ -6,10 +6,14 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 rust-version.workspace = true
-description = "Núcleo del editor: buffer de texto, cursores e historial de cambios"
+description = "Núcleo del editor: buffer de texto, cursores, historial y resaltado sintáctico"
 
 [dependencies]
-anyhow  = { workspace = true }
-ropey   = { workspace = true }
-serde   = { workspace = true }
-uuid    = { workspace = true }
+anyhow               = { workspace = true }
+ropey                = { workspace = true }
+serde                = { workspace = true }
+uuid                 = { workspace = true }
+tracing              = { workspace = true }
+tree-sitter          = { workspace = true }
+tree-sitter-highlight = { workspace = true }
+tree-sitter-rust     = { workspace = true }

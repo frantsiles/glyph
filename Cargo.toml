@@ -36,7 +36,9 @@ thiserror    = "1"
 ropey        = "1.6"
 
 # Syntax highlighting
-tree-sitter  = "0.22"
+tree-sitter           = "0.22"
+tree-sitter-highlight = "0.22"
+tree-sitter-rust      = "0.21"  # grammar compatible con tree-sitter 0.22
 
 # WASM runtime para plugins
 wasmtime     = { version = "20", features = ["async", "component-model"] }

@@ -12,8 +12,10 @@ pub mod buffer;
 pub mod cursor;
 pub mod document;
 pub mod history;
+pub mod resaltado;
 
 pub use buffer::{Buffer, Codificacion, FinDeLinea};
 pub use cursor::{Cursor, Posicion, Selection};
 pub use document::Document;
 pub use history::{Historia, Operacion};
+pub use resaltado::{Lenguaje, Resaltador, SpanSintactico, TipoResaltado};

@@ -12,6 +12,28 @@
 //! Document del core y pasa al renderer. Así podemos cambiar la representación interna
 //! del core sin tocar el renderer, y viceversa.
 
+/// Color RGB para un fragmento de texto (independiente de cualquier tema visual)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorRender {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl ColorRender {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+/// Fragmento de texto coloreado (posiciones en bytes, compatible con str slicing UTF-8)
+#[derive(Debug, Clone)]
+pub struct SpanTexto {
+    pub inicio_byte: usize,
+    pub fin_byte: usize,
+    pub color: ColorRender,
+}
+
 /// Posición del cursor para renderizar (independiente de `glyph_core::Posicion`)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorRender {
@@ -32,6 +54,9 @@ pub struct ContenidoRender {
 
     /// Tamaño de fuente en puntos (sobreescribe el de ConfigRenderer si presente)
     pub tamano_fuente: f32,
+
+    /// Spans de sintaxis coloreados — vacío si no hay resaltado activo
+    pub spans: Vec<SpanTexto>,
 }
 
 impl ContenidoRender {
@@ -41,6 +66,7 @@ impl ContenidoRender {
             lineas: vec![String::new()],
             cursor: Some(CursorRender::default()),
             tamano_fuente: 16.0,
+            spans: Vec::new(),
         }
     }
 
