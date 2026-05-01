@@ -2,80 +2,208 @@
 
 > Every character matters.
 
-A fast, native code editor built in Rust. Extend it with Lua, WASM, or whatever you know.
+Editor de código nativo construido en Rust: renderizado GPU, syntax highlighting con tree-sitter, cliente LSP asíncrono y un sistema de plugins híbrido Lua/WASM.
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
-![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)
+![Status](https://img.shields.io/badge/status-milestone%202%20completo-green.svg)
 
 ---
 
 ## ¿Qué es Glyph?
 
-Glyph es un editor de código multiplataforma de escritorio construido desde cero en Rust, con renderizado GPU, soporte nativo de LSP y un sistema de plugins híbrido que no te obliga a aprender un lenguaje específico.
+Glyph es un editor de código de escritorio multiplataforma construido desde cero en Rust, con renderizado GPU, soporte nativo de LSP y un sistema de plugins que no te obliga a aprender un lenguaje específico.
 
 ## Filosofía
 
-- **El core hace lo mínimo** — todo lo demás es un plugin, incluso las features nativas
+- **El core hace lo mínimo** — sin dependencias de UI, sin I/O; todo lo demás es una capa encima
 - **Los plugins son ciudadanos de primera clase** — usan la misma API que el editor internamente
-- **No limitamos el ecosistema** — escribe plugins en Lua, Rust (WASM), Go, C, Zig o cualquier lenguaje que compile a WASM
-- **La IA es un plugin más** — no un feature hardcodeado, soporta múltiples providers sin conflicto
+- **Ecosistema abierto** — escribe plugins en Lua, Rust (WASM), Go, C, Zig o cualquier lenguaje que compile a WASM
+- **La IA es un plugin más** — soporta múltiples providers sin estar hardcodeada en el core
+
+---
 
 ## Stack técnico
 
-| Componente | Tecnología | Razón |
-|---|---|---|
-| Lenguaje | Rust | Rendimiento + seguridad de memoria |
-| Renderizado | wgpu + winit | GPU nativo, fallback automático |
-| UI | iced | Framework maduro en Rust |
-| Buffer de texto | ropey (Rope) | Edición O(log n) |
-| Syntax | tree-sitter | El mismo que Neovim y Zed |
-| LSP | tower-lsp | Autocompletado inteligente |
-| Plugins simples | Lua (mlua) | Scripts sin compilar, recarga en caliente |
-| Plugins complejos | WASM (wasmtime) | Sandboxed, cualquier lenguaje |
+| Componente | Librería | Versión | Razón |
+|---|---|---|---|
+| Renderizado GPU | `wgpu` | 0.19 | API gráfica cross-platform (Vulkan / Metal / DX12 / WebGPU) |
+| Ventana y eventos | `winit` | 0.29 | Event loop nativo, soporte Wayland/X11/macOS/Windows |
+| Renderizado de texto | `glyphon` | 0.5 | Puente `cosmic-text` ↔ `wgpu`; ligaduras, RTL, Unicode |
+| Motor de fuentes | `cosmic-text` | 0.10 | Shaping profesional; dependencia transitiva de glyphon |
+| Buffer de texto | `ropey` | 1.6 | Estructura Rope — inserción/borrado O(log n) en archivos grandes |
+| Syntax highlighting | `tree-sitter` + `tree-sitter-highlight` | 0.22 | El mismo motor que Neovim y Zed; queries reutilizables |
+| Gramática Rust | `tree-sitter-rust` | 0.21 | Compatible con tree-sitter 0.22 |
+| Tipos LSP | `lsp-types` | 0.95 | Mensajes JSON-RPC estándar para el cliente LSP |
+| Runtime async | `tokio` | 1 | El cliente LSP corre en un hilo independiente |
+| Serialización | `serde` + `serde_json` | 1 | Mensajes LSP y configuración |
+| Logging | `tracing` + `tracing-subscriber` | 0.1 / 0.3 | Niveles de log configurables con `RUST_LOG` |
+| Errores | `anyhow` | 1 | Propagación ergonómica de errores en código de aplicación |
+| Plugins (futuro) | `mlua` + `wasmtime` | 0.9 / 20 | Lua para scripts simples, WASM para plugins compilados |
+
+---
+
+## Arquitectura
+
+### Grafo de dependencias entre crates
+
+```
+glyph-app  (binario)
+  ├── glyph-core       — núcleo puro (sin UI, sin async, sin I/O)
+  ├── glyph-renderer   — ventana + GPU + event loop
+  └── glyph-lsp        — cliente LSP asíncrono (tokio)
+```
+
+Los crates no tienen dependencias circulares. `glyph-core` no conoce ni al renderer ni al LSP.
+
+### glyph-core
+
+El núcleo del editor. Contiene:
+
+- **`Buffer`** — texto almacenado en una `Rope` de `ropey`. Todas las operaciones de edición son O(log n). Guarda la ruta del archivo, codificación y si hay cambios sin guardar.
+- **`Cursor` / `Posicion`** — posición actual del cursor (línea + columna). Soporta múltiples cursores en la estructura pero la app usa uno por ahora.
+- **`Document`** — orquesta `Buffer` + `cursores` + `Historia`. Es el único punto de entrada para operaciones de edición (`insertar_en_cursor`, `borrar_antes_cursor`, `mover_cursor_*`, `deshacer`, `rehacer`).
+- **`Historia`** — undo/redo mediante una pila de `Operacion` (inserciones y borrados con posición y texto).
+- **`Resaltador`** — wrappea `tree-sitter-highlight`. Recibe texto en bruto y devuelve `Vec<SpanSintactico>` con rangos de bytes y tipo semántico (`PalabraClave`, `Funcion`, `Comentario`, etc.). La gramática activa se elige por extensión de archivo.
+
+### glyph-renderer
+
+Toda la lógica de presentación. No importa ningún tipo de `glyph-core`.
+
+- **`ContenidoRender`** — DTO (*Data Transfer Object*) que `glyph-app` construye a partir del `Document` y pasa al renderer. Contiene líneas de texto, posición del cursor y `Vec<SpanTexto>` (spans con `ColorRender` ya resuelto). Esta separación permite cambiar la representación interna del core sin tocar el renderer y viceversa.
+- **`ContextoGpu`** — inicializa `wgpu` (instancia, adaptador, dispositivo, superficie). La ventana vive en un `Arc<Window>` para que `Surface<'static>` sea válida.
+- **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Soporta dos modos:
+  - *Plain*: texto monocolor con cursor overlay amarillo.
+  - *Highlighted*: construye segmentos `(str_slice, Attrs)` a partir de los spans semánticos, superpone el cursor cortando el span que lo contenga.
+- **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Emite `EventoEditor` al manejador de la app en cada evento de teclado relevante.
+- **`EventoEditor`** — enum que describe la intención del usuario: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. El renderer no sabe nada de edición; solo detecta teclas y delega.
+
+### glyph-lsp
+
+Cliente JSON-RPC asíncrono para servidores LSP.
+
+- **`transporte`** — lee y escribe el framing `Content-Length:\r\n\r\n<json>` sobre stdin/stdout del proceso servidor.
+- **`ClienteLsp`** — se conecta a cualquier servidor LSP (por defecto `rust-analyzer`) lanzándolo como proceso hijo. Internamente usa dos tareas Tokio:
+  - *Tarea escritora*: consume un canal y escribe mensajes al stdin del servidor.
+  - *Tarea lectora*: lee del stdout, despacha respuestas a peticiones pendientes (via `oneshot`) y emite notificaciones al canal `rx_notificacion`.
+- **`Notificacion`** — actualmente: `Diagnosticos(PublishDiagnosticsParams)`. Más notificaciones en Milestone 3.
+
+### glyph-app
+
+Orquesta el sistema. Es el único punto donde los tres crates anteriores se tocan.
+
+```
+┌─ main() ──────────────────────────────────────────────────────────┐
+│  Document (glyph-core)                                            │
+│  Resaltador (glyph-core)          → documento_a_contenido()       │
+│                                         ↓ ContenidoRender         │
+│  glyph_renderer::ejecutar()  ←──────────┘                         │
+│       │ EventoEditor                                               │
+│       ▼                                                            │
+│  match evento → Document::método()                                │
+│       │ texto cambiado                                             │
+│       ▼                                                            │
+│  tx_lsp.send(uri, texto, versión)  ──→  hilo tokio                │
+│                                              │                     │
+│                                    ClienteLsp::cambiar_documento() │
+│                                    Notificacion::Diagnosticos      │
+│                                    tracing::warn!()                │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+El hilo LSP corre un `tokio::runtime::Runtime` independiente para no bloquear el event loop de `winit`. La comunicación app → LSP usa `tokio::sync::mpsc::unbounded_channel` (el `send` es síncrono desde el event loop).
+
+---
 
 ## Estructura del proyecto
 
 ```
 glyph/
+├── Cargo.toml                  # Workspace — versiones y deps compartidas
+├── Cargo.lock                  # Commiteado (proyecto binario)
+│
 ├── crates/
-│   ├── glyph-core/         # Buffer, cursores, historial — sin dependencias de UI
-│   ├── glyph-renderer/     # Renderizado GPU con wgpu
-│   ├── glyph-lsp/          # Cliente LSP
-│   ├── glyph-plugin-host/  # Runtime de plugins (Lua + WASM)
-│   ├── glyph-plugin-api/   # Contratos WIT — API pública para plugins
-│   └── glyph-app/          # Entry point — integra todo
-├── plugins/                # Plugins oficiales (usan la misma API que terceros)
-│   ├── plugin-theme/
-│   ├── plugin-git/
-│   └── plugin-formatter/
-└── docs/
-    └── plugin-sdk.md       # Guía para desarrolladores de plugins
+│   ├── glyph-core/             # Núcleo puro: Buffer, Cursor, Document, Resaltador
+│   ├── glyph-renderer/         # Ventana, GPU, event loop (winit + wgpu + glyphon)
+│   ├── glyph-lsp/              # Cliente LSP asíncrono (tokio + lsp-types)
+│   ├── glyph-plugin-host/      # Runtime de plugins — pendiente Milestone 3
+│   ├── glyph-plugin-api/       # Contratos WIT — API pública para plugins
+│   └── glyph-app/              # Binario: orquesta core + renderer + LSP
+│
+└── plugins/                    # Plugins oficiales (usan la misma API que terceros)
+    ├── plugin-theme/            # Tema visual — pendiente Milestone 3
+    ├── plugin-git/              # Integración Git
+    └── plugin-formatter/        # Formateo de código
 ```
+
+---
+
+## Cómo compilar y ejecutar
+
+**Requisitos:**
+- Rust 1.75+ (`rustup update stable`)
+- Drivers gráficos con soporte Vulkan, Metal o DirectX 12
+- (Opcional) `rust-analyzer` en `$PATH` para el cliente LSP
+
+```bash
+# Compilar todo el workspace
+cargo build
+
+# Abrir un archivo (con syntax highlighting y LSP si rust-analyzer está instalado)
+cargo run -p glyph -- src/main.rs
+
+# Abrir un buffer vacío
+cargo run -p glyph
+
+# Ver logs de diagnósticos LSP
+RUST_LOG=info cargo run -p glyph -- archivo.rs
+```
+
+**Atajos de teclado:**
+
+| Tecla | Acción |
+|---|---|
+| `Ctrl+S` | Guardar |
+| `Ctrl+Z` | Deshacer |
+| `Ctrl+Y` | Rehacer |
+| `Tab` | Insertar 4 espacios |
+| `Flechas` | Mover cursor |
+| `Inicio` / `Fin` | Inicio / fin de línea |
+| `Supr` | Borrar carácter adelante |
+| `Backspace` | Borrar carácter atrás |
+
+---
 
 ## Roadmap
 
-### Milestone 1 — Editor funcional
-- [ ] Buffer con Rope (glyph-core)
-- [ ] Renderizado básico con wgpu
-- [ ] Abrir, editar y guardar archivos
-- [ ] Undo/redo
+### Milestone 1 — Editor funcional ✅
+- [x] Buffer con Rope (`ropey`) en `glyph-core`
+- [x] Renderizado GPU con `wgpu` + texto con `glyphon`
+- [x] Event loop nativo con `winit`
+- [x] Cursor con overlay visual (color de acento)
+- [x] Abrir, editar y guardar archivos desde la CLI
+- [x] Undo/redo con historial de operaciones
 
-### Milestone 2 — Inteligencia
-- [ ] Syntax highlighting con tree-sitter
-- [ ] Cliente LSP (autocompletado, diagnósticos)
-- [ ] Búsqueda y reemplazo
+### Milestone 2 — Inteligencia ✅
+- [x] Syntax highlighting con `tree-sitter` (Rust, extensible)
+- [x] Tema One Dark aplicado sobre spans semánticos
+- [x] Cliente LSP asíncrono (`rust-analyzer`)
+- [x] `didOpen` / `didChange` enviados en cada edición
+- [x] Diagnósticos recibidos y registrados en log
+- [ ] Búsqueda y reemplazo en buffer
 
 ### Milestone 3 — Plugin System
-- [ ] Plugin host con wasmtime
-- [ ] Scripting Lua embebido
-- [ ] WIT API v1
-- [ ] Sistema de permisos declarativo
-- [ ] Plugin manager
+- [ ] Plugin host con `wasmtime` (componentes WASM sandboxed)
+- [ ] Scripting Lua embebido con `mlua`
+- [ ] WIT API v1 — contratos de extensión
+- [ ] Sistema de permisos declarativo por plugin
+- [ ] Temas como plugins Lua (`plugin-theme`)
+- [ ] Diagnósticos LSP visibles en el renderer (squiggles)
+- [ ] Popup de hover en el renderer
 
 ### Milestone 4 — IA como plugin
 - [ ] Provider pattern para modelos de IA
-- [ ] Soporte Ollama (local/privado)
+- [ ] Soporte Ollama (inferencia local/privada)
 - [ ] Routing de IA por tipo de archivo
 - [ ] Múltiples agentes sin conflicto
 
@@ -84,9 +212,11 @@ glyph/
 - [ ] Documentación del SDK de plugins
 - [ ] Marketplace de plugins
 
+---
+
 ## Contribuir
 
-Glyph está en desarrollo activo y acepta contribuciones. Por favor lee [CONTRIBUTING.md](CONTRIBUTING.md) antes de abrir un PR.
+Glyph está en desarrollo activo. Por favor lee [CONTRIBUTING.md](CONTRIBUTING.md) antes de abrir un PR.
 
 El proyecto usa **Apache 2.0** — puedes usar el código, hacer forks, incluso versiones comerciales. Los cambios no necesitan ser abiertos, pero deben documentarse.
 
