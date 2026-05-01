@@ -256,6 +256,39 @@ impl Document {
         self.cursores[0].mover_a(linea, col, false);
     }
 
+    /// Mueve el cursor `n` líneas hacia arriba (Page Up).
+    pub fn mover_cursor_pagina_arriba(&mut self, n: usize) {
+        let pos = self.cursores[0].posicion;
+        let nueva_linea = pos.linea.saturating_sub(n);
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), false);
+    }
+
+    /// Mueve el cursor `n` líneas hacia abajo (Page Down).
+    pub fn mover_cursor_pagina_abajo(&mut self, n: usize) {
+        let pos = self.cursores[0].posicion;
+        let total = self.buffer.lineas();
+        let nueva_linea = (pos.linea + n).min(total.saturating_sub(1));
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), false);
+    }
+
+    /// Mueve el cursor al inicio del documento (Ctrl+Home).
+    pub fn mover_cursor_inicio_doc(&mut self) {
+        self.cursores[0].mover_a(0, 0, false);
+    }
+
+    /// Mueve el cursor al final del documento (Ctrl+End).
+    pub fn mover_cursor_fin_doc(&mut self) {
+        let total = self.buffer.lineas();
+        if total == 0 {
+            return;
+        }
+        let ultima = total - 1;
+        let col = self.longitud_linea(ultima);
+        self.cursores[0].mover_a(ultima, col, false);
+    }
+
     // ------------------------------------------------------------------
     // Búsqueda
     // ------------------------------------------------------------------

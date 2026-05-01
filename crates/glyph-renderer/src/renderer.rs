@@ -234,6 +234,12 @@ fn resolver_evento(
                 "f" | "F" => Some(EventoEditor::IniciarBusqueda),
                 _ => None,
             },
+            Key::Named(NamedKey::Home) => {
+                Some(EventoEditor::MoverCursor(DireccionCursor::InicioDoc))
+            }
+            Key::Named(NamedKey::End) => {
+                Some(EventoEditor::MoverCursor(DireccionCursor::FinDoc))
+            }
             _ => None,
         };
     }
@@ -264,6 +270,12 @@ fn resolver_evento(
         }
         Key::Named(NamedKey::End) => {
             return Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea));
+        }
+        Key::Named(NamedKey::PageUp) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaArriba));
+        }
+        Key::Named(NamedKey::PageDown) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaAbajo));
         }
         _ => {}
     }

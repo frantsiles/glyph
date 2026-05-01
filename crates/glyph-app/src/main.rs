@@ -29,6 +29,8 @@ use glyph_renderer::{
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
+const LINEAS_POR_PAGINA: usize = 20;
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -190,6 +192,10 @@ fn main() -> Result<()> {
                 DireccionCursor::Abajo => documento.mover_cursor_abajo(),
                 DireccionCursor::InicioLinea => documento.mover_cursor_inicio_linea(),
                 DireccionCursor::FinLinea => documento.mover_cursor_fin_linea(),
+                DireccionCursor::PaginaArriba => documento.mover_cursor_pagina_arriba(LINEAS_POR_PAGINA),
+                DireccionCursor::PaginaAbajo => documento.mover_cursor_pagina_abajo(LINEAS_POR_PAGINA),
+                DireccionCursor::InicioDoc => documento.mover_cursor_inicio_doc(),
+                DireccionCursor::FinDoc => documento.mover_cursor_fin_doc(),
             },
             EventoEditor::Deshacer => {
                 if let Err(e) = documento.deshacer() {

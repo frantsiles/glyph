@@ -16,8 +16,12 @@ pub enum DireccionCursor {
     Derecha,
     Arriba,
     Abajo,
-    InicioLinea, // Home
-    FinLinea,    // End
+    InicioLinea,  // Home
+    FinLinea,     // End
+    PaginaArriba, // Page Up — sube N líneas
+    PaginaAbajo,  // Page Down — baja N líneas
+    InicioDoc,    // Ctrl+Home — inicio del documento
+    FinDoc,       // Ctrl+End — fin del documento
 }
 
 /// Eventos de edición emitidos por el renderer hacia la capa de aplicación

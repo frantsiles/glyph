@@ -191,6 +191,8 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 | `Tab` | Insertar 4 espacios |
 | `Flechas` | Mover cursor |
 | `Inicio` / `Fin` | Inicio / fin de línea |
+| `Re Pág` / `Av Pág` | Saltar 20 líneas arriba/abajo |
+| `Ctrl+Inicio` / `Ctrl+Fin` | Inicio / fin del documento |
 | `Supr` | Borrar carácter adelante |
 | `Backspace` | Borrar carácter atrás |
 
@@ -232,6 +234,8 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Conversión UTF-16 → byte para posiciones LSP
 - [x] Búsqueda en buffer (Ctrl+F) con navegación entre resultados
 - [x] Barra de estado: nombre de archivo, posición del cursor, errores LSP y estado de búsqueda
+- [x] Scroll automático: el editor sigue al cursor con 3 líneas de contexto
+- [x] Navegación extendida: Page Up/Down, Ctrl+Home/End
 - [ ] Sistema de permisos declarativo por plugin
 - [ ] Plugin host WASM con `wasmtime`
 - [ ] WIT API v1 — contratos para plugins compilados

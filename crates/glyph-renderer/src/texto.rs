@@ -49,6 +49,8 @@ fn color_diagnostico(severidad: SeveridadRender) -> Color {
     }
 }
 
+const MARGEN_SCROLL: i32 = 3; // líneas de contexto visibles sobre/bajo el cursor
+
 /// Encapsula el pipeline de renderizado de texto (editor + barra de estado).
 pub struct RendererTexto {
     sistema_fuentes: FontSystem,
@@ -59,6 +61,7 @@ pub struct RendererTexto {
     buffer_barra: Buffer,
     metricas: Metrics,
     metricas_barra: Metrics,
+    scroll_linea: i32,
 }
 
 impl RendererTexto {
@@ -87,16 +90,32 @@ impl RendererTexto {
         let mut buffer_barra = Buffer::new(&mut sistema_fuentes, metricas_barra);
         buffer_barra.set_size(&mut sistema_fuentes, 1280.0, ALTURA_BARRA);
 
-        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, buffer_barra, metricas, metricas_barra }
+        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, buffer_barra, metricas, metricas_barra, scroll_linea: 0 }
     }
 
     /// Actualiza el buffer de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
-        let Self { sistema_fuentes, buffer, buffer_barra, metricas, metricas_barra, .. } = self;
+        let alto_editor = (alto - ALTURA_BARRA).max(1.0);
+
+        // Calcular scroll para mantener el cursor visible
+        if let Some(cursor) = contenido.cursor {
+            let cursor_line = cursor.linea as i32;
+            let visible_lines = (alto_editor / self.metricas.line_height) as i32;
+            let visible_lines = visible_lines.max(1);
+
+            if cursor_line < self.scroll_linea + MARGEN_SCROLL {
+                self.scroll_linea = (cursor_line - MARGEN_SCROLL).max(0);
+            } else if cursor_line >= self.scroll_linea + visible_lines - MARGEN_SCROLL {
+                self.scroll_linea = (cursor_line - visible_lines + 1 + MARGEN_SCROLL).max(0);
+            }
+        }
+
+        let Self { sistema_fuentes, buffer, buffer_barra, metricas, metricas_barra, scroll_linea, .. } = self;
 
         // — Editor principal —
         buffer.set_metrics(sistema_fuentes, *metricas);
-        buffer.set_size(sistema_fuentes, ancho, (alto - ALTURA_BARRA).max(1.0));
+        buffer.set_size(sistema_fuentes, ancho, alto_editor);
+        buffer.set_scroll(*scroll_linea);
 
         let texto = contenido.texto_completo();
         let cursor_byte = contenido.cursor.map(|c| cursor_byte_offset(&contenido.lineas, c));
