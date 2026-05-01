@@ -1,0 +1,11 @@
+[package]
+name        = "plugin-formatter"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Plugin oficial de formateo de código (WASM) — pendiente Milestone 3"
+
+[dependencies]

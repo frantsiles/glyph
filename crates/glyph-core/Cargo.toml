@@ -1,0 +1,15 @@
+[package]
+name        = "glyph-core"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Núcleo del editor: buffer de texto, cursores e historial de cambios"
+
+[dependencies]
+anyhow  = { workspace = true }
+ropey   = { workspace = true }
+serde   = { workspace = true }
+uuid    = { workspace = true }

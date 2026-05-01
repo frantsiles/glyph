@@ -1,0 +1,12 @@
+[package]
+name        = "glyph-lsp"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Cliente LSP para Glyph — pendiente Milestone 2"
+
+# Sin dependencias hasta Milestone 2
+[dependencies]

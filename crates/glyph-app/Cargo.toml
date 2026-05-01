@@ -1,0 +1,20 @@
+[package]
+name        = "glyph-app"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Binario principal del editor Glyph"
+
+[[bin]]
+name = "glyph"
+path = "src/main.rs"
+
+[dependencies]
+glyph-core     = { path = "../glyph-core" }
+glyph-renderer = { path = "../glyph-renderer" }
+anyhow              = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }

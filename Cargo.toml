@@ -54,6 +54,12 @@ iced         = { version = "0.12", features = ["async-std", "image", "svg"] }
 # Renderizado de texto profesional (RTL, ligaduras, unicode)
 cosmic-text  = "0.11"
 
+# Integración wgpu + cosmic-text para renderizar texto en GPU
+glyphon      = "0.5"
+
+# Ejecutar futures síncronamente (inicialización de wgpu en el event loop)
+pollster     = "0.3"
+
 # LSP
 tower-lsp    = "0.20"
 lsp-types    = "0.95"

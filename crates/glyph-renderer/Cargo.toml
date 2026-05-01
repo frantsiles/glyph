@@ -1,0 +1,17 @@
+[package]
+name        = "glyph-renderer"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Renderer GPU de Glyph: ventana winit, superficie wgpu, texto con glyphon/cosmic-text"
+
+[dependencies]
+wgpu     = { workspace = true }
+winit    = { workspace = true }
+glyphon  = { workspace = true }
+pollster = { workspace = true }
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
