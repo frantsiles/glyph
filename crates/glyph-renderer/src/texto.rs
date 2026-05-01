@@ -3,23 +3,26 @@
 
 //! # RendererTexto
 //!
-//! Renderiza texto usando `glyphon` (integración de `cosmic-text` con wgpu).
+//! Renderiza texto usando `glyphon` (cosmic-text + wgpu).
 //!
-//! ## Responsabilidades
-//! - Mantener el `FontSystem` (carga de fuentes del sistema) y la caché de formas.
-//! - Actualizar el `Buffer` de texto cuando el contenido cambia.
-//! - Llamar a `prepare` antes del render pass y `render` dentro de él.
+//! ## Cursor
 //!
-//! ## Separación prepare / render
-//! `prepare` actualiza el atlas de glifos en la GPU (operación de escritura).
-//! `render` emite draw calls dentro del render pass (solo lectura del atlas).
-//! Ambas fases deben mantenerse separadas por la API de wgpu.
+//! El carácter en la posición del cursor se resalta con un color de acento
+//! usando `Buffer::set_rich_text`. Esto evita necesitar un pipeline de
+//! rectángulos separado para el cursor en Milestone 2.
 
 use anyhow::{anyhow, Result};
 use glyphon::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
     TextAtlas, TextBounds, TextRenderer,
 };
+
+use crate::contenido::{ContenidoRender, CursorRender};
+
+// Color por defecto del texto
+const COLOR_TEXTO: Color = Color::rgb(0xCC, 0xCC, 0xCC);
+// Color de acento para resaltar el carácter bajo el cursor
+const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xCC, 0x00);
 
 /// Encapsula el pipeline de renderizado de texto
 pub struct RendererTexto {
@@ -33,11 +36,6 @@ pub struct RendererTexto {
 
 impl RendererTexto {
     /// Crea el renderer de texto.
-    ///
-    /// # Parámetros
-    /// - `formato`: debe coincidir con el formato de la superficie wgpu.
-    /// - `tamano_fuente`: puntos de fuente.
-    /// - `multiplicador_linea`: factor de altura de línea (ej: 1.4).
     pub fn nuevo(
         dispositivo: &wgpu::Device,
         cola: &wgpu::Queue,
@@ -57,7 +55,6 @@ impl RendererTexto {
 
         let metricas = Metrics::new(tamano_fuente, tamano_fuente * multiplicador_linea);
         let mut buffer = Buffer::new(&mut sistema_fuentes, metricas);
-        // Tamaño inicial genérico — se actualiza en cada frame
         buffer.set_size(&mut sistema_fuentes, 1280.0, 720.0);
 
         Self {
@@ -70,11 +67,10 @@ impl RendererTexto {
         }
     }
 
-    /// Actualiza el texto y el tamaño del viewport del buffer.
+    /// Actualiza el buffer de texto con el contenido actual y resalta el cursor.
     ///
-    /// Llamar cuando el contenido o el tamaño de la ventana cambien.
-    pub fn actualizar_contenido(&mut self, texto: &str, ancho: f32, alto: f32) {
-        // Split borrow — Rust permite acceso simultáneo a campos distintos
+    /// Debe llamarse antes de `preparar`, cuando el contenido o el tamaño cambian.
+    pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
         let Self {
             sistema_fuentes,
             buffer,
@@ -84,17 +80,37 @@ impl RendererTexto {
 
         buffer.set_metrics(sistema_fuentes, *metricas);
         buffer.set_size(sistema_fuentes, ancho, alto);
-        buffer.set_text(
-            sistema_fuentes,
-            texto,
-            Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-        );
+
+        let texto = contenido.texto_completo();
+
+        if let Some(cursor) = contenido.cursor {
+            let offset = offset_cursor(&contenido.lineas, cursor);
+            let total = texto.chars().count();
+
+            let attrs_normal = Attrs::new().family(Family::Monospace).color(COLOR_TEXTO);
+            let attrs_cursor = Attrs::new().family(Family::Monospace).color(COLOR_CURSOR);
+
+            // Dividir el texto en tres partes: antes | bajo_cursor | después
+            let (antes, bajo_cursor, despues) = dividir_en_cursor(&texto, offset, total);
+
+            buffer.set_rich_text(
+                sistema_fuentes,
+                [
+                    (antes.as_str(), attrs_normal),
+                    (bajo_cursor.as_str(), attrs_cursor),
+                    (despues.as_str(), attrs_normal),
+                ],
+                Shaping::Advanced,
+            );
+        } else {
+            let attrs = Attrs::new().family(Family::Monospace).color(COLOR_TEXTO);
+            buffer.set_text(sistema_fuentes, &texto, attrs, Shaping::Advanced);
+        }
+
         buffer.shape_until_scroll(sistema_fuentes);
     }
 
     /// Prepara el atlas de glifos para el frame actual.
-    ///
     /// Debe llamarse **antes** de iniciar cualquier render pass.
     pub fn preparar(
         &mut self,
@@ -103,10 +119,8 @@ impl RendererTexto {
         ancho: u32,
         alto: u32,
     ) -> Result<()> {
-        // Liberar glifos no usados en el frame anterior
         self.atlas.trim();
 
-        // Split borrow para que el borrow checker permita acceder a todos los campos
         let Self {
             renderer,
             sistema_fuentes,
@@ -137,7 +151,7 @@ impl RendererTexto {
                         right: ancho as i32,
                         bottom: alto as i32,
                     },
-                    default_color: Color::rgb(0xCC, 0xCC, 0xCC),
+                    default_color: COLOR_TEXTO,
                 }],
                 cache_formas,
             )
@@ -145,7 +159,6 @@ impl RendererTexto {
     }
 
     /// Emite los draw calls de texto dentro de un render pass activo.
-    ///
     /// Debe llamarse **dentro** de un render pass, después de `preparar`.
     pub fn renderizar_en_pase<'pass>(
         &'pass self,
@@ -154,5 +167,38 @@ impl RendererTexto {
         self.renderer
             .render(&self.atlas, pase)
             .map_err(|e| anyhow!("glyphon render falló: {e:?}"))
+    }
+}
+
+// ------------------------------------------------------------------
+// Helpers privados
+// ------------------------------------------------------------------
+
+/// Calcula el offset lineal del cursor en el texto completo (post-join con \n).
+fn offset_cursor(lineas: &[String], cursor: CursorRender) -> usize {
+    let linea = (cursor.linea as usize).min(lineas.len().saturating_sub(1));
+    let mut offset = 0;
+    for i in 0..linea {
+        offset += lineas[i].chars().count() + 1; // +1 por el \n que se inserta al join
+    }
+    let max_col = lineas.get(linea).map(|l| l.chars().count()).unwrap_or(0);
+    offset += (cursor.columna as usize).min(max_col);
+    offset
+}
+
+/// Divide el texto en tres fragmentos: antes del cursor, bajo el cursor, después.
+/// Si el cursor está al final, el carácter bajo el cursor es un espacio sintético.
+fn dividir_en_cursor(texto: &str, offset: usize, total: usize) -> (String, String, String) {
+    if offset < total {
+        let antes: String = texto.chars().take(offset).collect();
+        let bajo_cursor: String = texto.chars().nth(offset).map(|c| {
+            // Los saltos de línea no son visibles — mostrar espacio como indicador
+            if c == '\n' { '\n' } else { c }
+        }).into_iter().collect();
+        let despues: String = texto.chars().skip(offset + 1).collect();
+        (antes, bajo_cursor, despues)
+    } else {
+        // Cursor al final del documento
+        (texto.to_string(), " ".to_string(), String::new())
     }
 }

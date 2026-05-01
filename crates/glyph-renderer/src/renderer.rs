@@ -3,41 +3,50 @@
 
 //! # Renderer
 //!
-//! Event loop principal del editor basado en winit 0.29.
+//! Event loop principal del editor (winit 0.29).
 //!
-//! ## Ciclo de vida
+//! ## Patrón manejador
 //!
-//! ```text
-//! Renderer::ejecutar()
-//!   ├─ Crea la ventana (WindowBuilder)
-//!   ├─ Inicializa ContextoGpu (wgpu)
-//!   ├─ Inicializa RendererTexto (glyphon)
-//!   └─ EventLoop::run(closure)
-//!       ├─ WindowEvent::CloseRequested  → elwt.exit()
-//!       ├─ WindowEvent::Resized         → gpu.redimensionar() + request_redraw()
-//!       └─ Event::RedrawRequested       → renderizar_frame()
-//! ```
+//! El renderer detecta eventos de teclado y los traduce a `EventoEditor`.
+//! Los delega a un closure `manejador: FnMut(EventoEditor) -> Option<ContenidoRender>`
+//! provisto por `glyph-app`. Si el manejador devuelve `Some(nuevo_contenido)`,
+//! el renderer actualiza la pantalla. El renderer no conoce `glyph-core`.
+//!
+//! ## Teclas soportadas
+//!
+//! | Tecla           | Evento             |
+//! |---|---|
+//! | Caracteres      | InsertarTexto      |
+//! | Enter           | InsertarTexto("\n")|
+//! | Tab             | InsertarTexto("    ") — 4 espacios |
+//! | Backspace       | BorrarAtras        |
+//! | Delete          | BorrarAdelante     |
+//! | Flechas         | MoverCursor        |
+//! | Home / End      | InicioLinea / FinLinea |
+//! | Ctrl+S          | Guardar            |
+//! | Ctrl+Z          | Deshacer           |
+//! | Ctrl+Y          | Rehacer            |
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use winit::{
     dpi::PhysicalSize,
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::WindowBuilder,
 };
 
 use crate::{
     configuracion::ConfigRenderer,
     contenido::ContenidoRender,
+    eventos::{DireccionCursor, EventoEditor},
     gpu::ContextoGpu,
     texto::RendererTexto,
 };
 
 /// Renderer principal — encapsula config + contenido inicial.
-///
-/// Llamar `ejecutar()` para lanzar la ventana y el event loop.
 pub struct Renderer {
     config: ConfigRenderer,
     contenido: ContenidoRender,
@@ -48,14 +57,18 @@ impl Renderer {
         Self { config, contenido }
     }
 
-    /// Inicia la ventana y el event loop. Bloquea hasta que el usuario cierra la ventana.
-    pub fn ejecutar(self) -> Result<()> {
+    /// Inicia el event loop. Bloquea hasta que el usuario cierra la ventana.
+    ///
+    /// `manejador` recibe cada `EventoEditor` y devuelve `Some(ContenidoRender)`
+    /// si el contenido cambió, o `None` si no hay nada que redibujar.
+    pub fn ejecutar<F>(self, mut manejador: F) -> Result<()>
+    where
+        F: FnMut(EventoEditor) -> Option<ContenidoRender> + 'static,
+    {
         let Self { config, contenido } = self;
 
-        // ── Crear event loop ─────────────────────────────────────────────
         let event_loop = EventLoop::new()?;
 
-        // ── Crear ventana antes de run() (válido en Linux/macOS/Windows) ─
         let window = Arc::new(
             WindowBuilder::new()
                 .with_title(&config.titulo)
@@ -63,10 +76,7 @@ impl Renderer {
                 .build(&event_loop)?,
         );
 
-        // ── Inicializar contexto GPU ─────────────────────────────────────
         let mut gpu = pollster::block_on(ContextoGpu::nuevo(window.clone()))?;
-
-        // ── Inicializar renderer de texto ────────────────────────────────
         let mut texto = RendererTexto::nuevo(
             &gpu.dispositivo,
             &gpu.cola,
@@ -76,42 +86,63 @@ impl Renderer {
         );
 
         tracing::info!(
-            "Glyph iniciado — ventana {}×{} | fuente {}pt",
+            "Glyph iniciado — {}×{} | {}pt",
             config.ancho,
             config.alto,
             config.tamano_fuente
         );
 
-        // Solicitar el primer frame
+        // Estado de modificadores (Ctrl, Shift, etc.)
+        let mut mods = ModifiersState::default();
+        // Contenido mutable dentro del closure
+        let mut contenido = contenido;
+
         window.request_redraw();
 
-        // ── Event loop ───────────────────────────────────────────────────
-        // winit 0.29: clausura (Event, &EventLoopWindowTarget)
-        // ControlFlow::Wait + request_redraw() = loop dirigido por eventos
         event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Wait);
 
             match event {
                 Event::WindowEvent { event, window_id } if window_id == window.id() => {
                     match event {
+                        // ── Cierre ──────────────────────────────────────
                         WindowEvent::CloseRequested => {
-                            tracing::info!("Ventana cerrada — saliendo del editor");
+                            tracing::info!("Ventana cerrada — saliendo");
                             elwt.exit();
                         }
 
+                        // ── Redimensionar ────────────────────────────────
                         WindowEvent::Resized(nuevo_tamaño) => {
                             gpu.redimensionar(nuevo_tamaño.width, nuevo_tamaño.height);
                             window.request_redraw();
                         }
 
-                        // En algunos OS el factor de escala cambia el tamaño efectivo
                         WindowEvent::ScaleFactorChanged { .. } => {
                             let tamaño = window.inner_size();
                             gpu.redimensionar(tamaño.width, tamaño.height);
                             window.request_redraw();
                         }
 
-                        // En winit 0.29 RedrawRequested es un WindowEvent (no Event de nivel raíz)
+                        // ── Modificadores (Ctrl, Shift…) ─────────────────
+                        WindowEvent::ModifiersChanged(nuevos_mods) => {
+                            mods = nuevos_mods.state();
+                        }
+
+                        // ── Teclado ──────────────────────────────────────
+                        WindowEvent::KeyboardInput { event: ev, .. }
+                            if ev.state == ElementState::Pressed =>
+                        {
+                            let evento_opt = resolver_evento(&ev.logical_key, ev.text.as_deref(), mods);
+
+                            if let Some(evento) = evento_opt {
+                                if let Some(nuevo) = manejador(evento) {
+                                    contenido = nuevo;
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+
+                        // ── Dibujar ──────────────────────────────────────
                         WindowEvent::RedrawRequested => {
                             renderizar_frame(&window, &mut gpu, &mut texto, &contenido);
                         }
@@ -129,7 +160,69 @@ impl Renderer {
 }
 
 // ------------------------------------------------------------------
-// Función de renderizado de un frame
+// Traducción de teclas → EventoEditor
+// ------------------------------------------------------------------
+
+/// Convierte un `Key` de winit en un `EventoEditor`, teniendo en cuenta modificadores.
+/// Devuelve `None` para teclas que el editor no procesa (F-keys, etc.).
+fn resolver_evento(
+    key: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+) -> Option<EventoEditor> {
+    // ── Atajos con Ctrl ─────────────────────────────────────────────
+    if mods.control_key() {
+        return match key {
+            Key::Character(c) => match c.as_str() {
+                "s" | "S" => Some(EventoEditor::Guardar),
+                "z" | "Z" => Some(EventoEditor::Deshacer),
+                "y" | "Y" => Some(EventoEditor::Rehacer),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
+
+    // ── Teclas nombradas ─────────────────────────────────────────────
+    match key {
+        Key::Named(NamedKey::Enter) => {
+            return Some(EventoEditor::InsertarTexto("\n".to_string()));
+        }
+        Key::Named(NamedKey::Tab) => {
+            // 4 espacios — configurable vía Lua en Milestone 3
+            return Some(EventoEditor::InsertarTexto("    ".to_string()));
+        }
+        Key::Named(NamedKey::Backspace) => return Some(EventoEditor::BorrarAtras),
+        Key::Named(NamedKey::Delete) => return Some(EventoEditor::BorrarAdelante),
+        Key::Named(NamedKey::ArrowLeft) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::Izquierda));
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::Derecha));
+        }
+        Key::Named(NamedKey::ArrowUp) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::Arriba));
+        }
+        Key::Named(NamedKey::ArrowDown) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::Abajo));
+        }
+        Key::Named(NamedKey::Home) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::InicioLinea));
+        }
+        Key::Named(NamedKey::End) => {
+            return Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea));
+        }
+        _ => {}
+    }
+
+    // ── Texto imprimible ─────────────────────────────────────────────
+    // `text` ya maneja dead keys, compose y el layout del teclado del usuario
+    text.filter(|t| !t.is_empty())
+        .map(|t| EventoEditor::InsertarTexto(t.to_string()))
+}
+
+// ------------------------------------------------------------------
+// Renderizado de un frame
 // ------------------------------------------------------------------
 
 fn renderizar_frame(
@@ -138,24 +231,19 @@ fn renderizar_frame(
     texto: &mut RendererTexto,
     contenido: &ContenidoRender,
 ) {
-    let texto_completo = contenido.texto_completo();
     let ancho = gpu.config_superficie.width;
     let alto = gpu.config_superficie.height;
 
-    // ── Actualizar buffer de texto ───────────────────────────────────
-    texto.actualizar_contenido(&texto_completo, ancho as f32, alto as f32);
+    texto.actualizar_contenido(contenido, ancho as f32, alto as f32);
 
-    // ── Preparar atlas fuera del render pass ─────────────────────────
     if let Err(e) = texto.preparar(&gpu.dispositivo, &gpu.cola, ancho, alto) {
         tracing::error!("Error preparando atlas de texto: {e}");
         return;
     }
 
-    // ── Obtener frame de la superficie ───────────────────────────────
     let frame = match gpu.superficie.get_current_texture() {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-            // Superficie invalidada — reconfigurar y reintentar en el siguiente frame
             gpu.redimensionar(ancho, alto);
             ventana.request_redraw();
             return;
@@ -176,7 +264,6 @@ fn renderizar_frame(
                 label: Some("encoder_principal"),
             });
 
-    // ── Render pass: fondo + texto ───────────────────────────────────
     {
         let mut pase = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pase_principal"),
@@ -185,7 +272,7 @@ fn renderizar_frame(
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.118, // fondo oscuro neutro — ajustable vía tema en Milestone 3
+                        r: 0.118,
                         g: 0.118,
                         b: 0.141,
                         a: 1.0,
@@ -203,10 +290,7 @@ fn renderizar_frame(
         }
     }
 
-    // ── Enviar comandos y presentar ──────────────────────────────────
     gpu.cola.submit([encoder.finish()]);
     frame.present();
-
-    // Siguiente frame — en Milestone 2 esto será event-driven
     ventana.request_redraw();
 }

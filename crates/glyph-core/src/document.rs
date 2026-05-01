@@ -56,15 +56,27 @@ impl Document {
     }
 
     // ------------------------------------------------------------------
-    // Operaciones de edición — pasan por la historia automáticamente
+    // Consultas de cursor
     // ------------------------------------------------------------------
 
-    /// Inserta texto en la posición del cursor principal
+    /// Retorna el cursor principal (el primero de la lista)
+    pub fn cursor_principal(&self) -> &Cursor {
+        &self.cursores[0]
+    }
+
+    /// Retorna el cursor principal de forma mutable
+    pub fn cursor_principal_mut(&mut self) -> &mut Cursor {
+        &mut self.cursores[0]
+    }
+
+    // ------------------------------------------------------------------
+    // Inserción
+    // ------------------------------------------------------------------
+
+    /// Inserta texto en la posición del cursor principal y avanza el cursor.
     pub fn insertar_en_cursor(&mut self, texto: &str) -> Result<()> {
-        let cursor = self.cursor_principal();
-        let indice = self
-            .buffer
-            .posicion_a_indice(cursor.posicion.linea, cursor.posicion.columna)?;
+        let pos = self.cursores[0].posicion; // Copy — el borrow termina aquí
+        let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
 
         self.historia.registrar(Operacion::Insertar {
             indice,
@@ -72,8 +84,72 @@ impl Document {
         });
 
         self.buffer.insertar(indice, texto);
+
+        // Avanzar cursor al final del texto insertado
+        let nuevo_indice = indice + texto.chars().count();
+        if let Ok((nueva_linea, nueva_col)) = self.buffer.indice_a_posicion(nuevo_indice) {
+            self.cursores[0].mover_a(nueva_linea, nueva_col, false);
+        }
+
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Borrado
+    // ------------------------------------------------------------------
+
+    /// Borra el carácter inmediatamente antes del cursor (Backspace).
+    pub fn borrar_antes_cursor(&mut self) -> Result<()> {
+        let pos = self.cursores[0].posicion; // Copy
+        let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
+
+        if indice == 0 {
+            return Ok(()); // ya estamos al inicio del documento
+        }
+
+        let inicio = indice - 1;
+        let texto_borrado = self.buffer.rango_texto(inicio, indice);
+
+        self.historia.registrar(Operacion::Eliminar {
+            indice: inicio,
+            texto: texto_borrado,
+        });
+
+        self.buffer.eliminar(inicio, indice);
+
+        // Retroceder cursor una posición
+        if let Ok((nueva_linea, nueva_col)) = self.buffer.indice_a_posicion(inicio) {
+            self.cursores[0].mover_a(nueva_linea, nueva_col, false);
+        }
+
+        Ok(())
+    }
+
+    /// Borra el carácter inmediatamente después del cursor (Delete).
+    pub fn borrar_despues_cursor(&mut self) -> Result<()> {
+        let pos = self.cursores[0].posicion; // Copy
+        let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
+
+        if indice >= self.buffer.caracteres() {
+            return Ok(()); // ya estamos al final del documento
+        }
+
+        let texto_borrado = self.buffer.rango_texto(indice, indice + 1);
+
+        self.historia.registrar(Operacion::Eliminar {
+            indice,
+            texto: texto_borrado,
+        });
+
+        self.buffer.eliminar(indice, indice + 1);
+        // El cursor no se mueve — el texto siguiente "sube" hacia él
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Undo / Redo
+    // ------------------------------------------------------------------
 
     /// Deshace la última operación
     pub fn deshacer(&mut self) -> Result<()> {
@@ -110,22 +186,162 @@ impl Document {
     }
 
     // ------------------------------------------------------------------
-    // Helpers de cursores
+    // Movimiento del cursor
     // ------------------------------------------------------------------
 
-    /// Retorna el cursor principal (el primero de la lista)
-    pub fn cursor_principal(&self) -> &Cursor {
-        &self.cursores[0]
+    /// Mueve el cursor un carácter a la izquierda.
+    /// Si está al inicio de línea, sube al final de la línea anterior.
+    pub fn mover_cursor_izquierda(&mut self) {
+        let pos = self.cursores[0].posicion; // Copy
+        let Ok(indice) = self.buffer.posicion_a_indice(pos.linea, pos.columna) else {
+            return;
+        };
+        if indice == 0 {
+            return;
+        }
+        if let Ok((linea, col)) = self.buffer.indice_a_posicion(indice - 1) {
+            self.cursores[0].mover_a(linea, col, false);
+        }
     }
 
-    /// Retorna el cursor principal de forma mutable
-    pub fn cursor_principal_mut(&mut self) -> &mut Cursor {
-        &mut self.cursores[0]
+    /// Mueve el cursor un carácter a la derecha.
+    /// Si está al final de línea, baja al inicio de la siguiente.
+    pub fn mover_cursor_derecha(&mut self) {
+        let pos = self.cursores[0].posicion; // Copy
+        let Ok(indice) = self.buffer.posicion_a_indice(pos.linea, pos.columna) else {
+            return;
+        };
+        if indice >= self.buffer.caracteres() {
+            return;
+        }
+        if let Ok((linea, col)) = self.buffer.indice_a_posicion(indice + 1) {
+            self.cursores[0].mover_a(linea, col, false);
+        }
+    }
+
+    /// Mueve el cursor una línea hacia arriba, conservando la columna si cabe.
+    pub fn mover_cursor_arriba(&mut self) {
+        let pos = self.cursores[0].posicion; // Copy
+        if pos.linea == 0 {
+            self.cursores[0].mover_a(0, 0, false);
+            return;
+        }
+        let nueva_linea = pos.linea - 1;
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), false);
+    }
+
+    /// Mueve el cursor una línea hacia abajo, conservando la columna si cabe.
+    pub fn mover_cursor_abajo(&mut self) {
+        let pos = self.cursores[0].posicion; // Copy
+        let total = self.buffer.lineas();
+        if pos.linea + 1 >= total {
+            return;
+        }
+        let nueva_linea = pos.linea + 1;
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), false);
+    }
+
+    /// Mueve el cursor al inicio de la línea actual (Home).
+    pub fn mover_cursor_inicio_linea(&mut self) {
+        let linea = self.cursores[0].posicion.linea;
+        self.cursores[0].mover_a(linea, 0, false);
+    }
+
+    /// Mueve el cursor al final de la línea actual (End).
+    pub fn mover_cursor_fin_linea(&mut self) {
+        let linea = self.cursores[0].posicion.linea;
+        let col = self.longitud_linea(linea);
+        self.cursores[0].mover_a(linea, col, false);
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers privados
+    // ------------------------------------------------------------------
+
+    /// Longitud en caracteres de una línea, sin contar el \n final.
+    fn longitud_linea(&self, linea: usize) -> usize {
+        self.buffer
+            .linea(linea)
+            .map(|l| l.trim_end_matches('\n').chars().count())
+            .unwrap_or(0)
     }
 }
 
 impl Default for Document {
     fn default() -> Self {
         Self::nuevo()
+    }
+}
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insertar_actualiza_cursor() {
+        let mut doc = Document::nuevo();
+        doc.insertar_en_cursor("hola").unwrap();
+        let pos = doc.cursor_principal().posicion;
+        assert_eq!(pos.columna, 4);
+        assert_eq!(pos.linea, 0);
+    }
+
+    #[test]
+    fn test_insertar_newline_mueve_linea() {
+        let mut doc = Document::nuevo();
+        doc.insertar_en_cursor("ab\ncd").unwrap();
+        let pos = doc.cursor_principal().posicion;
+        assert_eq!(pos.linea, 1);
+        assert_eq!(pos.columna, 2);
+    }
+
+    #[test]
+    fn test_borrar_antes_cursor() {
+        let mut doc = Document::nuevo();
+        doc.insertar_en_cursor("hola").unwrap();
+        doc.borrar_antes_cursor().unwrap();
+        assert_eq!(doc.buffer.contenido_completo(), "hol");
+        assert_eq!(doc.cursor_principal().posicion.columna, 3);
+    }
+
+    #[test]
+    fn test_borrar_despues_cursor() {
+        let mut doc = Document::desde_archivo("hola", PathBuf::from("f.txt"));
+        doc.borrar_despues_cursor().unwrap();
+        assert_eq!(doc.buffer.contenido_completo(), "ola");
+        assert_eq!(doc.cursor_principal().posicion.columna, 0);
+    }
+
+    #[test]
+    fn test_mover_cursor_izquierda_derecha() {
+        let mut doc = Document::desde_archivo("abc", PathBuf::from("f.txt"));
+        doc.mover_cursor_derecha();
+        assert_eq!(doc.cursor_principal().posicion.columna, 1);
+        doc.mover_cursor_izquierda();
+        assert_eq!(doc.cursor_principal().posicion.columna, 0);
+    }
+
+    #[test]
+    fn test_mover_cursor_arriba_abajo() {
+        let mut doc = Document::desde_archivo("linea1\nlinea2", PathBuf::from("f.txt"));
+        doc.mover_cursor_abajo();
+        assert_eq!(doc.cursor_principal().posicion.linea, 1);
+        doc.mover_cursor_arriba();
+        assert_eq!(doc.cursor_principal().posicion.linea, 0);
+    }
+
+    #[test]
+    fn test_inicio_fin_linea() {
+        let mut doc = Document::desde_archivo("hola mundo", PathBuf::from("f.txt"));
+        doc.mover_cursor_fin_linea();
+        assert_eq!(doc.cursor_principal().posicion.columna, 10);
+        doc.mover_cursor_inicio_linea();
+        assert_eq!(doc.cursor_principal().posicion.columna, 0);
     }
 }
