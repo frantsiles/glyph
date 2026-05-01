@@ -12,24 +12,29 @@
 //! glyph archivo.rs       # abre un archivo existente (o crea uno nuevo)
 //! ```
 //!
-//! ## Responsabilidades de esta capa
+//! ## Capas
 //!
-//! - Inicializar logging
-//! - Cargar el archivo desde la CLI (o crear buffer vacío)
-//! - Traducir `EventoEditor` → operaciones en `Document` → `ContenidoRender`
-//! - Guardar el archivo en disco (el core no tiene I/O)
-//! - Aplicar el tema de colores (One Dark) sobre los spans del resaltador
+//! ```text
+//! glyph-core   — Document, Buffer, Cursor, Resaltador
+//! glyph-lsp    — ClienteLsp en hilo tokio independiente
+//! glyph-app    — orquestación: eventos → core → renderer + LSP
+//! glyph-renderer — ventana GPU, event loop winit
+//! ```
 
 use anyhow::Result;
 use glyph_core::{
     resaltado::{Lenguaje, Resaltador, TipoResaltado},
     Document,
 };
+use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Url};
 use glyph_renderer::{
     ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DireccionCursor, EventoEditor,
     SpanTexto,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc as tokio_mpsc;
 
 fn main() -> Result<()> {
     // ── Logging ──────────────────────────────────────────────────────────
@@ -64,10 +69,34 @@ fn main() -> Result<()> {
     let resaltador = Resaltador::nuevo();
     let lenguaje = lenguaje_del_doc(&ruta_archivo);
 
+    // ── Canal LSP: cambios del editor → hilo LSP ─────────────────────────
+    // El canal lleva (uri, texto_completo, versión)
+    let (tx_lsp, rx_lsp) = tokio_mpsc::unbounded_channel::<(Url, String, i32)>();
+
+    // ── Hilo LSP ──────────────────────────────────────────────────────────
+    // Corre un runtime Tokio independiente para no bloquear el event loop de winit.
+    if let Some(ref ruta) = ruta_archivo {
+        let ruta_lsp = ruta.canonicalize().unwrap_or_else(|_| ruta.clone());
+        let uri = Url::from_file_path(&ruta_lsp).ok();
+        let raiz = ruta_lsp
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let texto_inicial = documento.buffer.contenido_completo();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("runtime tokio para LSP");
+            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp));
+        });
+    }
+
+    // ── Versión del documento (para LSP didChange) ────────────────────────
+    let version_doc = Arc::new(AtomicI32::new(1));
+
     // ── Contenido inicial ─────────────────────────────────────────────────
     let contenido_inicial = documento_a_contenido(&documento, &resaltador, lenguaje);
 
-    // ── Título de ventana con nombre de archivo ───────────────────────────
+    // ── Título de ventana ─────────────────────────────────────────────────
     let titulo = ruta_archivo
         .as_ref()
         .and_then(|p| p.file_name())
@@ -79,8 +108,22 @@ fn main() -> Result<()> {
         ..ConfigRenderer::default()
     };
 
+    // ── URI del documento abierto (para enviar al LSP tras cada cambio) ───
+    let uri_doc: Option<Url> = ruta_archivo
+        .as_ref()
+        .and_then(|r| r.canonicalize().ok())
+        .and_then(|r| Url::from_file_path(r).ok());
+
     // ── Event loop ────────────────────────────────────────────────────────
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
+        let texto_antes = match evento {
+            // Guardamos el estado antes de modificar para detectar cambios
+            EventoEditor::InsertarTexto(_)
+            | EventoEditor::BorrarAtras
+            | EventoEditor::BorrarAdelante => true,
+            _ => false,
+        };
+
         match evento {
             // ── Inserción ──────────────────────────────────────────────
             EventoEditor::InsertarTexto(texto) => {
@@ -152,15 +195,92 @@ fn main() -> Result<()> {
             }
         }
 
+        // Notificar cambio de texto al LSP (solo en eventos que modifican contenido)
+        if texto_antes {
+            if let Some(ref uri) = uri_doc {
+                let version = version_doc.fetch_add(1, Ordering::Relaxed);
+                let texto = documento.buffer.contenido_completo();
+                let _ = tx_lsp.send((uri.clone(), texto, version));
+            }
+        }
+
         Some(documento_a_contenido(&documento, &resaltador, lenguaje))
     })
+}
+
+// ------------------------------------------------------------------
+// Hilo LSP (runtime Tokio independiente)
+// ------------------------------------------------------------------
+
+async fn hilo_lsp(
+    uri: Option<Url>,
+    texto_inicial: String,
+    raiz: PathBuf,
+    mut rx: tokio_mpsc::UnboundedReceiver<(Url, String, i32)>,
+) {
+    let mut cliente = match ClienteLsp::conectar("rust-analyzer", &[], &raiz).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("LSP no disponible (rust-analyzer no encontrado): {e}");
+            return;
+        }
+    };
+
+    // Abrir documento inicial
+    if let Some(ref uri) = uri {
+        if let Err(e) = cliente.abrir_documento(uri.clone(), &texto_inicial, 0).await {
+            tracing::warn!("LSP didOpen falló: {e}");
+        }
+    }
+
+    loop {
+        tokio::select! {
+            // Cambio de documento desde el editor
+            msg = rx.recv() => {
+                match msg {
+                    Some((uri, texto, version)) => {
+                        if let Err(e) = cliente.cambiar_documento(uri, &texto, version).await {
+                            tracing::warn!("LSP didChange falló: {e}");
+                        }
+                    }
+                    None => break, // canal cerrado (editor terminó)
+                }
+            }
+
+            // Notificación del servidor LSP
+            Some(notif) = cliente.rx_notificacion.recv() => {
+                match notif {
+                    Notificacion::Diagnosticos(params) => {
+                        registrar_diagnosticos(&params.diagnostics);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Escribe los diagnósticos en el log. Milestone 3 los mostrará en el renderer.
+fn registrar_diagnosticos(diags: &[Diagnostic]) {
+    if diags.is_empty() {
+        return;
+    }
+    for d in diags {
+        let nivel = match d.severity {
+            Some(DiagnosticSeverity::ERROR)   => "ERROR",
+            Some(DiagnosticSeverity::WARNING) => "WARN",
+            Some(DiagnosticSeverity::INFORMATION) => "INFO",
+            _ => "HINT",
+        };
+        let linea = d.range.start.line + 1;
+        let col   = d.range.start.character + 1;
+        tracing::warn!("[LSP {nivel}] {linea}:{col} — {}", d.message);
+    }
 }
 
 // ------------------------------------------------------------------
 // Conversión Document → ContenidoRender
 // ------------------------------------------------------------------
 
-/// Único punto de contacto entre glyph-core y glyph-renderer.
 fn documento_a_contenido(
     doc: &Document,
     resaltador: &Resaltador,
@@ -170,7 +290,6 @@ fn documento_a_contenido(
     let texto_completo = doc.buffer.contenido_completo();
 
     let lineas: Vec<String> = texto_completo.lines().map(|l| l.to_string()).collect();
-
     let lineas = if texto_completo.ends_with('\n') {
         let mut v = lineas;
         v.push(String::new());
@@ -206,18 +325,18 @@ fn documento_a_contenido(
 
 fn tipo_a_color(tipo: TipoResaltado) -> ColorRender {
     match tipo {
-        TipoResaltado::PalabraClave   => ColorRender::rgb(0xC6, 0x78, 0xDD), // morado
-        TipoResaltado::CadenaTexto    => ColorRender::rgb(0x98, 0xC3, 0x79), // verde
-        TipoResaltado::Comentario     => ColorRender::rgb(0x5C, 0x63, 0x70), // gris
-        TipoResaltado::Funcion        => ColorRender::rgb(0x61, 0xAF, 0xEF), // azul
-        TipoResaltado::Tipo           => ColorRender::rgb(0xE5, 0xC0, 0x7B), // amarillo
-        TipoResaltado::Numero         => ColorRender::rgb(0xD1, 0x9A, 0x66), // naranja
-        TipoResaltado::Operador       => ColorRender::rgb(0x56, 0xB6, 0xC2), // cian
-        TipoResaltado::Variable       => ColorRender::rgb(0xE0, 0x6C, 0x75), // rojo
-        TipoResaltado::Constante      => ColorRender::rgb(0xD1, 0x9A, 0x66), // naranja
-        TipoResaltado::Puntuacion     => ColorRender::rgb(0xAB, 0xB2, 0xBF), // gris claro
-        TipoResaltado::Atributo       => ColorRender::rgb(0xE5, 0xC0, 0x7B), // amarillo
-        TipoResaltado::Predeterminado => ColorRender::rgb(0xAB, 0xB2, 0xBF), // gris claro
+        TipoResaltado::PalabraClave   => ColorRender::rgb(0xC6, 0x78, 0xDD),
+        TipoResaltado::CadenaTexto    => ColorRender::rgb(0x98, 0xC3, 0x79),
+        TipoResaltado::Comentario     => ColorRender::rgb(0x5C, 0x63, 0x70),
+        TipoResaltado::Funcion        => ColorRender::rgb(0x61, 0xAF, 0xEF),
+        TipoResaltado::Tipo           => ColorRender::rgb(0xE5, 0xC0, 0x7B),
+        TipoResaltado::Numero         => ColorRender::rgb(0xD1, 0x9A, 0x66),
+        TipoResaltado::Operador       => ColorRender::rgb(0x56, 0xB6, 0xC2),
+        TipoResaltado::Variable       => ColorRender::rgb(0xE0, 0x6C, 0x75),
+        TipoResaltado::Constante      => ColorRender::rgb(0xD1, 0x9A, 0x66),
+        TipoResaltado::Puntuacion     => ColorRender::rgb(0xAB, 0xB2, 0xBF),
+        TipoResaltado::Atributo       => ColorRender::rgb(0xE5, 0xC0, 0x7B),
+        TipoResaltado::Predeterminado => ColorRender::rgb(0xAB, 0xB2, 0xBF),
     }
 }
 

@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 glyph-core     = { path = "../glyph-core" }
 glyph-renderer = { path = "../glyph-renderer" }
+glyph-lsp      = { path = "../glyph-lsp" }
 anyhow              = { workspace = true }
+tokio               = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
