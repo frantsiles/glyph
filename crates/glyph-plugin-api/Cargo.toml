@@ -6,7 +6,7 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 rust-version.workspace = true
-description = "Contratos WIT y tipos públicos del SDK de plugins — pendiente Milestone 3"
+description = "Contratos públicos del SDK de plugins de Glyph"
 
-# Sin dependencias hasta Milestone 3
 [dependencies]
+serde = { workspace = true }

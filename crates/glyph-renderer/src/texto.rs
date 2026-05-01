@@ -5,11 +5,22 @@
 //!
 //! Renderiza texto usando `glyphon` (cosmic-text + wgpu).
 //!
-//! ## Modos de renderizado
+//! ## Jerarquía de color por fragmento
 //!
-//! - **Plain** (`spans` vacío): texto monocolor con cursor amarillo.
-//! - **Highlighted** (`spans` no vacío): cada span lleva su color semántico;
-//!   el cursor se superpone como overlay cortando el span que lo contenga.
+//! ```text
+//! 1. COLOR_TEXTO   (predeterminado)
+//! 2. Span sintáctico  (tree-sitter)
+//! 3. Diagnóstico LSP  (sobreescribe sintaxis en su rango)
+//! 4. Cursor           (sobreescribe todo en su carácter)
+//! ```
+//!
+//! ## Algoritmo de barrido de fronteras
+//!
+//! Todos los extremos de spans, diagnósticos y cursor se convierten en
+//! "fronteras". El texto queda partido en segmentos entre fronteras
+//! consecutivas. Cada segmento recibe el color de mayor prioridad que
+//! lo cubre. Esto garantiza corrección con cualquier combinación de
+//! rangos solapados.
 
 use anyhow::{anyhow, Result};
 use glyphon::{
@@ -17,12 +28,21 @@ use glyphon::{
     TextAtlas, TextBounds, TextRenderer,
 };
 
-use crate::contenido::{ContenidoRender, CursorRender, SpanTexto};
+use crate::contenido::{ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto};
 
 const COLOR_TEXTO: Color = Color::rgb(0xCC, 0xCC, 0xCC);
 const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xCC, 0x00);
 
-/// Encapsula el pipeline de renderizado de texto
+fn color_diagnostico(severidad: SeveridadRender) -> Color {
+    match severidad {
+        SeveridadRender::Error       => Color::rgb(0xFF, 0x6B, 0x6B),
+        SeveridadRender::Aviso       => Color::rgb(0xFF, 0xBF, 0x69),
+        SeveridadRender::Informacion => Color::rgb(0x61, 0xAF, 0xEF),
+        SeveridadRender::Sugerencia  => Color::rgb(0x98, 0x98, 0x98),
+    }
+}
+
+/// Encapsula el pipeline de renderizado de texto.
 pub struct RendererTexto {
     sistema_fuentes: FontSystem,
     cache_formas: SwashCache,
@@ -33,7 +53,6 @@ pub struct RendererTexto {
 }
 
 impl RendererTexto {
-    /// Crea el renderer de texto.
     pub fn nuevo(
         dispositivo: &wgpu::Device,
         cola: &wgpu::Queue,
@@ -55,26 +74,12 @@ impl RendererTexto {
         let mut buffer = Buffer::new(&mut sistema_fuentes, metricas);
         buffer.set_size(&mut sistema_fuentes, 1280.0, 720.0);
 
-        Self {
-            sistema_fuentes,
-            cache_formas,
-            atlas,
-            renderer,
-            buffer,
-            metricas,
-        }
+        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, metricas }
     }
 
-    /// Actualiza el buffer de texto con el contenido actual.
-    ///
-    /// Debe llamarse antes de `preparar`, cuando el contenido o el tamaño cambian.
+    /// Actualiza el buffer de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
-        let Self {
-            sistema_fuentes,
-            buffer,
-            metricas,
-            ..
-        } = self;
+        let Self { sistema_fuentes, buffer, metricas, .. } = self;
 
         buffer.set_metrics(sistema_fuentes, *metricas);
         buffer.set_size(sistema_fuentes, ancho, alto);
@@ -82,58 +87,21 @@ impl RendererTexto {
         let texto = contenido.texto_completo();
         let cursor_byte = contenido.cursor.map(|c| cursor_byte_offset(&contenido.lineas, c));
 
-        if contenido.spans.is_empty() {
-            // Modo plain: monocolor con cursor overlay
-            let attrs_normal = Attrs::new().family(Family::Monospace).color(COLOR_TEXTO);
-            let attrs_cursor = Attrs::new().family(Family::Monospace).color(COLOR_CURSOR);
+        let fragmentos = construir_spans_glyphon(
+            &texto,
+            &contenido.spans,
+            &contenido.diagnosticos,
+            cursor_byte,
+        );
 
-            match cursor_byte {
-                Some(cb) if cb < texto.len() => {
-                    let char_end = texto[cb..]
-                        .chars()
-                        .next()
-                        .map(|c| cb + c.len_utf8())
-                        .unwrap_or(cb + 1)
-                        .min(texto.len());
-                    buffer.set_rich_text(
-                        sistema_fuentes,
-                        [
-                            (&texto[..cb], attrs_normal),
-                            (&texto[cb..char_end], attrs_cursor),
-                            (&texto[char_end..], attrs_normal),
-                        ],
-                        Shaping::Advanced,
-                    );
-                }
-                Some(_) => {
-                    // Cursor al final del documento
-                    buffer.set_rich_text(
-                        sistema_fuentes,
-                        [
-                            (texto.as_str(), attrs_normal),
-                            (" ", attrs_cursor),
-                            ("", attrs_normal),
-                        ],
-                        Shaping::Advanced,
-                    );
-                }
-                None => {
-                    buffer.set_text(sistema_fuentes, &texto, attrs_normal, Shaping::Advanced);
-                }
-            }
-        } else {
-            // Modo resaltado: spans coloreados + cursor overlay
-            let fragmentos = construir_spans_glyphon(&texto, &contenido.spans, cursor_byte);
-            let refs: Vec<(&str, Attrs)> =
-                fragmentos.iter().map(|(s, a)| (s.as_str(), *a)).collect();
-            buffer.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
-        }
+        let refs: Vec<(&str, Attrs)> =
+            fragmentos.iter().map(|(s, a)| (s.as_str(), *a)).collect();
 
+        buffer.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
         buffer.shape_until_scroll(sistema_fuentes);
     }
 
-    /// Prepara el atlas de glifos para el frame actual.
-    /// Debe llamarse **antes** de iniciar cualquier render pass.
+    /// Prepara el atlas de glifos para el frame actual (antes del render pass).
     pub fn preparar(
         &mut self,
         dispositivo: &wgpu::Device,
@@ -143,14 +111,7 @@ impl RendererTexto {
     ) -> Result<()> {
         self.atlas.trim();
 
-        let Self {
-            renderer,
-            sistema_fuentes,
-            atlas,
-            buffer,
-            cache_formas,
-            ..
-        } = self;
+        let Self { renderer, sistema_fuentes, atlas, buffer, cache_formas, .. } = self;
 
         renderer
             .prepare(
@@ -158,10 +119,7 @@ impl RendererTexto {
                 cola,
                 sistema_fuentes,
                 atlas,
-                Resolution {
-                    width: ancho,
-                    height: alto,
-                },
+                Resolution { width: ancho, height: alto },
                 [TextArea {
                     buffer,
                     left: 8.0,
@@ -180,8 +138,7 @@ impl RendererTexto {
             .map_err(|e| anyhow!("glyphon prepare falló: {e:?}"))
     }
 
-    /// Emite los draw calls de texto dentro de un render pass activo.
-    /// Debe llamarse **dentro** de un render pass, después de `preparar`.
+    /// Emite draw calls de texto dentro de un render pass activo.
     pub fn renderizar_en_pase<'pass>(
         &'pass self,
         pase: &mut wgpu::RenderPass<'pass>,
@@ -193,109 +150,160 @@ impl RendererTexto {
 }
 
 // ------------------------------------------------------------------
-// Helpers privados
+// Algoritmo de barrido de fronteras
 // ------------------------------------------------------------------
 
-/// Byte offset del cursor en el texto completo (texto_completo = lineas.join("\n")).
+/// Construye fragmentos `(texto, Attrs)` respetando la jerarquía de color:
+/// predeterminado < sintaxis < diagnóstico < cursor.
+///
+/// Garantiza corrección incluso con spans y diagnósticos solapados:
+/// todos los extremos se convierten en fronteras y cada segmento
+/// resultante recibe un único color según la prioridad más alta.
+fn construir_spans_glyphon(
+    texto: &str,
+    spans: &[SpanTexto],
+    diagnosticos: &[DiagnosticoRender],
+    cursor_byte: Option<usize>,
+) -> Vec<(String, Attrs<'static>)> {
+    let total = texto.len();
+    if total == 0 {
+        // Texto vacío: solo muestra el cursor si lo hay
+        if cursor_byte.is_some() {
+            return vec![(
+                " ".to_string(),
+                Attrs::new().family(Family::Monospace).color(COLOR_CURSOR),
+            )];
+        }
+        return vec![];
+    }
+
+    // ── Paso 1: recopilar todas las fronteras ────────────────────────────
+    let mut fronteras: Vec<usize> = vec![0, total];
+
+    for s in spans {
+        fronteras.push(s.inicio_byte.min(total));
+        fronteras.push(s.fin_byte.min(total));
+    }
+    for d in diagnosticos {
+        fronteras.push(d.inicio_byte.min(total));
+        fronteras.push(d.fin_byte.min(total));
+    }
+    if let Some(cb) = cursor_byte {
+        let cb = cb.min(total);
+        fronteras.push(cb);
+        if cb < total {
+            let fin_char = texto[cb..]
+                .chars()
+                .next()
+                .map(|c| cb + c.len_utf8())
+                .unwrap_or(cb + 1)
+                .min(total);
+            fronteras.push(fin_char);
+        }
+    }
+
+    fronteras.sort_unstable();
+    fronteras.dedup();
+
+    // ── Paso 2: asignar color a cada segmento ────────────────────────────
+    // El rango del cursor (para comparaciones rápidas)
+    let cursor_range: Option<(usize, usize)> = cursor_byte.map(|cb| {
+        let cb = cb.min(total);
+        if cb < total {
+            let fin = texto[cb..]
+                .chars()
+                .next()
+                .map(|c| cb + c.len_utf8())
+                .unwrap_or(cb + 1)
+                .min(total);
+            (cb, fin)
+        } else {
+            (total, total) // marcador para cursor past-end
+        }
+    });
+
+    let mut resultado: Vec<(String, Attrs<'static>)> = Vec::new();
+
+    for w in fronteras.windows(2) {
+        let (seg_ini, seg_fin) = (w[0], w[1]);
+        if seg_ini >= seg_fin || seg_fin > total {
+            continue;
+        }
+
+        // Punto representativo del segmento (siempre en su interior)
+        let mid = seg_ini;
+
+        // Prioridad 4: cursor
+        let es_cursor = cursor_range
+            .map(|(cs, ce)| mid >= cs && mid < ce)
+            .unwrap_or(false);
+
+        if es_cursor {
+            resultado.push((
+                texto[seg_ini..seg_fin].to_string(),
+                Attrs::new().family(Family::Monospace).color(COLOR_CURSOR),
+            ));
+            continue;
+        }
+
+        // Prioridad 3: diagnóstico (último que cubre mid gana)
+        let color_diag = diagnosticos
+            .iter()
+            .rev()
+            .find(|d| d.inicio_byte <= mid && d.fin_byte > mid)
+            .map(|d| color_diagnostico(d.severidad));
+
+        if let Some(color) = color_diag {
+            resultado.push((
+                texto[seg_ini..seg_fin].to_string(),
+                Attrs::new().family(Family::Monospace).color(color),
+            ));
+            continue;
+        }
+
+        // Prioridad 2: span sintáctico (último que cubre mid gana)
+        let color_sintax = spans
+            .iter()
+            .rev()
+            .find(|s| s.inicio_byte <= mid && s.fin_byte > mid)
+            .map(|s| Color::rgb(s.color.r, s.color.g, s.color.b));
+
+        let color = color_sintax.unwrap_or(COLOR_TEXTO);
+        resultado.push((
+            texto[seg_ini..seg_fin].to_string(),
+            Attrs::new().family(Family::Monospace).color(color),
+        ));
+    }
+
+    // Cursor al final del documento (past-end): espacio sintético
+    if let Some((cs, _)) = cursor_range {
+        if cs >= total {
+            resultado.push((
+                " ".to_string(),
+                Attrs::new().family(Family::Monospace).color(COLOR_CURSOR),
+            ));
+        }
+    }
+
+    resultado
+}
+
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
+
+/// Byte offset del cursor en `lineas.join("\n")`.
+/// `cursor.columna` es índice de carácter (no byte); se convierte correctamente.
 fn cursor_byte_offset(lineas: &[String], cursor: CursorRender) -> usize {
     let linea = (cursor.linea as usize).min(lineas.len().saturating_sub(1));
-    let mut offset = 0usize;
-    for i in 0..linea {
-        offset += lineas[i].len() + 1; // +1 por el \n del join
-    }
-    // cursor.columna es índice de carácter — convertir a byte offset
+    let offset: usize = lineas[..linea].iter().map(|l| l.len() + 1).sum();
+
     let linea_str = lineas.get(linea).map(|s| s.as_str()).unwrap_or("");
     let byte_col = linea_str
         .char_indices()
         .nth(cursor.columna as usize)
         .map(|(b, _)| b)
         .unwrap_or(linea_str.len());
+
     offset + byte_col
-}
-
-/// Construye fragmentos coloreados a partir de spans semánticos y cursor overlay.
-///
-/// Los gaps entre spans se rellenan con COLOR_TEXTO.
-/// El carácter bajo el cursor se sobreescribe con COLOR_CURSOR.
-fn construir_spans_glyphon(
-    texto: &str,
-    spans: &[SpanTexto],
-    cursor_byte: Option<usize>,
-) -> Vec<(String, Attrs<'static>)> {
-    let total = texto.len();
-
-    // Paso 1: segmentos planos (start, end, Color) rellenando gaps
-    let mut segmentos: Vec<(usize, usize, Color)> = Vec::new();
-    let mut pos = 0usize;
-
-    for span in spans {
-        let s = span.inicio_byte.max(pos);
-        let e = span.fin_byte.min(total);
-        if s > pos {
-            segmentos.push((pos, s, COLOR_TEXTO));
-        }
-        if s < e {
-            let c = span.color;
-            segmentos.push((s, e, Color::rgb(c.r, c.g, c.b)));
-        }
-        pos = e.max(pos);
-    }
-    if pos < total {
-        segmentos.push((pos, total, COLOR_TEXTO));
-    }
-
-    // Paso 2: rango del carácter bajo el cursor (en bytes)
-    let cursor_range: Option<(usize, usize)> = cursor_byte.map(|cb| {
-        if cb < total {
-            let char_end = texto[cb..]
-                .chars()
-                .next()
-                .map(|c| cb + c.len_utf8())
-                .unwrap_or(cb + 1)
-                .min(total);
-            (cb, char_end)
-        } else {
-            (total, total + 1) // marcador sintético — tratado abajo
-        }
-    });
-
-    // Paso 3: emitir fragmentos con overlay del cursor
-    let mut resultado: Vec<(String, Attrs<'static>)> = Vec::new();
-
-    for &(start, end, color) in &segmentos {
-        let base = Attrs::new().family(Family::Monospace).color(color);
-
-        if let Some((cs, ce)) = cursor_range {
-            if ce <= start || cs >= end {
-                // Sin solapamiento
-                if start < end {
-                    resultado.push((texto[start..end].to_string(), base));
-                }
-            } else {
-                // Solapamiento — cortar en tres partes
-                if start < cs {
-                    resultado.push((texto[start..cs].to_string(), base));
-                }
-                let cursor_attrs = Attrs::new().family(Family::Monospace).color(COLOR_CURSOR);
-                resultado.push((texto[cs.max(start)..ce.min(end)].to_string(), cursor_attrs));
-                if ce < end {
-                    resultado.push((texto[ce..end].to_string(), base));
-                }
-            }
-        } else {
-            if start < end {
-                resultado.push((texto[start..end].to_string(), base));
-            }
-        }
-    }
-
-    // Cursor al final del documento: espacio sintético
-    if let Some((cs, _)) = cursor_range {
-        if cs >= total {
-            let cursor_attrs = Attrs::new().family(Family::Monospace).color(COLOR_CURSOR);
-            resultado.push((" ".to_string(), cursor_attrs));
-        }
-    }
-
-    resultado
 }

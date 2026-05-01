@@ -39,7 +39,7 @@ Glyph es un editor de código de escritorio multiplataforma construido desde cer
 | Serialización | `serde` + `serde_json` | 1 | Mensajes LSP y configuración |
 | Logging | `tracing` + `tracing-subscriber` | 0.1 / 0.3 | Niveles de log configurables con `RUST_LOG` |
 | Errores | `anyhow` | 1 | Propagación ergonómica de errores en código de aplicación |
-| Plugins (futuro) | `mlua` + `wasmtime` | 0.9 / 20 | Lua para scripts simples, WASM para plugins compilados |
+| Runtime de plugins | `mlua` | 0.9 | Lua embebido (vendored); `wasmtime` para WASM en Milestone 4 |
 
 ---
 
@@ -88,30 +88,53 @@ Cliente JSON-RPC asíncrono para servidores LSP.
   - *Tarea lectora*: lee del stdout, despacha respuestas a peticiones pendientes (via `oneshot`) y emite notificaciones al canal `rx_notificacion`.
 - **`Notificacion`** — actualmente: `Diagnosticos(PublishDiagnosticsParams)`. Más notificaciones en Milestone 3.
 
+### glyph-plugin-api
+
+Contratos públicos del SDK. Define el trait `Plugin` con hooks opcionales (`inicializar`, `al_cambiar`, `al_guardar`, `al_abrir`) y `AccionPlugin` (lo que un plugin puede devolver al editor: `EstablecerTema`, `LogMensaje`). Sin dependencias de UI.
+
+### glyph-plugin-host
+
+Orquesta el ciclo de vida de los plugins. `HostPlugins`:
+- `cargar_lua(nombre, script)` — carga un script Lua como plugin usando `mlua`
+- `inicializar()` — llama `Plugin::inicializar()` en todos los plugins y aplica sus acciones
+- `color(clave)` — devuelve el color RGB activo para una clave semántica (`"keyword"`, `"string"`, etc.)
+
+Internamente, `PluginLua` envuelve un `mlua::Lua` + `RegistryKey` al módulo cargado. Los hooks de Lua se llaman por nombre si existen en la tabla devuelta por el script.
+
+### plugin-theme
+
+Plugin oficial de temas escrito en Lua (`init.lua`). El script se embebe en el binario con `include_str!`. Define el tema **One Dark** como una tabla `{ keyword = "#C678DD", string = "#98C379", ... }` devuelta por `M.tema()`. El host lee la tabla al inicializar y la convierte en el mapa de colores activo.
+
+Para personalizar el tema: cargar un script Lua propio con las mismas claves.
+
 ### glyph-app
 
-Orquesta el sistema. Es el único punto donde los tres crates anteriores se tocan.
+Orquesta el sistema. Es el único punto donde todos los crates se tocan.
 
 ```
 ┌─ main() ──────────────────────────────────────────────────────────┐
+│  HostPlugins::nuevo()                                             │
+│  host.cargar_lua(plugin_theme::TEMA_SCRIPT)                       │
+│  host.inicializar()  →  tema One Dark activo                      │
+│                                                                   │
 │  Document (glyph-core)                                            │
 │  Resaltador (glyph-core)          → documento_a_contenido()       │
-│                                         ↓ ContenidoRender         │
-│  glyph_renderer::ejecutar()  ←──────────┘                         │
+│  Arc<Mutex<Vec<Diagnostic>>>  ─────────┤                          │
+│                                        ↓ ContenidoRender          │
+│                              { spans, diagnosticos, cursor }      │
+│  glyph_renderer::ejecutar()  ←─────────┘                         │
 │       │ EventoEditor                                               │
 │       ▼                                                            │
 │  match evento → Document::método()                                │
 │       │ texto cambiado                                             │
-│       ▼                                                            │
-│  tx_lsp.send(uri, texto, versión)  ──→  hilo tokio                │
-│                                              │                     │
-│                                    ClienteLsp::cambiar_documento() │
-│                                    Notificacion::Diagnosticos      │
-│                                    tracing::warn!()                │
+│       ├─ tx_lsp.send(uri, texto, versión)  ──→  hilo tokio        │
+│       │                                    ClienteLsp::didChange  │
+│       │                                    Diagnosticos → Mutex   │
+│       └─ host.al_cambiar(ruta, version)                           │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-El hilo LSP corre un `tokio::runtime::Runtime` independiente para no bloquear el event loop de `winit`. La comunicación app → LSP usa `tokio::sync::mpsc::unbounded_channel` (el `send` es síncrono desde el event loop).
+El hilo LSP corre un `tokio::runtime::Runtime` independiente. Los diagnósticos fluyen del hilo LSP al event loop vía `Arc<Mutex<Vec<Diagnostic>>>` — el event loop los convierte a byte offsets en cada frame usando `posicion_lsp_a_byte` (UTF-16 → byte, según el estándar LSP).
 
 ---
 
@@ -126,14 +149,14 @@ glyph/
 │   ├── glyph-core/             # Núcleo puro: Buffer, Cursor, Document, Resaltador
 │   ├── glyph-renderer/         # Ventana, GPU, event loop (winit + wgpu + glyphon)
 │   ├── glyph-lsp/              # Cliente LSP asíncrono (tokio + lsp-types)
-│   ├── glyph-plugin-host/      # Runtime de plugins — pendiente Milestone 3
-│   ├── glyph-plugin-api/       # Contratos WIT — API pública para plugins
-│   └── glyph-app/              # Binario: orquesta core + renderer + LSP
+│   ├── glyph-plugin-api/       # Trait Plugin, AccionPlugin, ContextoPlugin
+│   ├── glyph-plugin-host/      # Runtime Lua (mlua); WASM pendiente Milestone 4
+│   └── glyph-app/              # Binario: orquesta todos los crates
 │
 └── plugins/                    # Plugins oficiales (usan la misma API que terceros)
-    ├── plugin-theme/            # Tema visual — pendiente Milestone 3
-    ├── plugin-git/              # Integración Git
-    └── plugin-formatter/        # Formateo de código
+    ├── plugin-theme/            # Tema One Dark — Lua embebido (init.lua)
+    ├── plugin-git/              # Integración Git — pendiente
+    └── plugin-formatter/        # Formateo de código — pendiente
 ```
 
 ---
@@ -192,20 +215,25 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Diagnósticos recibidos y registrados en log
 - [ ] Búsqueda y reemplazo en buffer
 
-### Milestone 3 — Plugin System
-- [ ] Plugin host con `wasmtime` (componentes WASM sandboxed)
-- [ ] Scripting Lua embebido con `mlua`
-- [ ] WIT API v1 — contratos de extensión
+### Milestone 3 — Plugin System ✅ (parcial)
+- [x] Trait `Plugin` y `AccionPlugin` en `glyph-plugin-api`
+- [x] `HostPlugins` con soporte Lua (`mlua`) en `glyph-plugin-host`
+- [x] Tema One Dark como plugin Lua (`plugin-theme/init.lua`)
+- [x] Diagnósticos LSP inline en el renderer (color overlay por severidad)
+- [x] Conversión UTF-16 → byte para posiciones LSP
 - [ ] Sistema de permisos declarativo por plugin
-- [ ] Temas como plugins Lua (`plugin-theme`)
-- [ ] Diagnósticos LSP visibles en el renderer (squiggles)
+- [ ] Plugin host WASM con `wasmtime`
+- [ ] WIT API v1 — contratos para plugins compilados
 - [ ] Popup de hover en el renderer
+- [ ] Búsqueda y reemplazo en buffer
 
-### Milestone 4 — IA como plugin
+### Milestone 4 — Plugin System avanzado + IA
+- [ ] Plugin host WASM con `wasmtime` (sandboxed, cualquier lenguaje)
+- [ ] WIT API v1 — contratos de extensión para plugins compilados
+- [ ] Sistema de permisos declarativo por plugin
 - [ ] Provider pattern para modelos de IA
 - [ ] Soporte Ollama (inferencia local/privada)
 - [ ] Routing de IA por tipo de archivo
-- [ ] Múltiples agentes sin conflicto
 
 ### Milestone 5 — Pulido
 - [ ] Temas personalizables

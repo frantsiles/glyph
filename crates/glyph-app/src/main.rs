@@ -15,11 +15,17 @@
 //! ## Capas
 //!
 //! ```text
-//! glyph-core   — Document, Buffer, Cursor, Resaltador
-//! glyph-lsp    — ClienteLsp en hilo tokio independiente
-//! glyph-app    — orquestación: eventos → core → renderer + LSP
-//! glyph-renderer — ventana GPU, event loop winit
+//! glyph-core        — Document, Buffer, Cursor, Resaltador
+//! glyph-lsp         — ClienteLsp (hilo tokio independiente)
+//! glyph-plugin-host — HostPlugins: carga y ejecuta plugins Lua
+//! plugin-theme      — script Lua con el tema One Dark
+//! glyph-app         — orquesta todo, sin conocer detalles internos de cada capa
+//! glyph-renderer    — ventana GPU, event loop winit
 //! ```
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::Result;
 use glyph_core::{
@@ -27,13 +33,11 @@ use glyph_core::{
     Document,
 };
 use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Url};
+use glyph_plugin_host::HostPlugins;
 use glyph_renderer::{
-    ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DireccionCursor, EventoEditor,
-    SpanTexto,
+    ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DiagnosticoRender,
+    DireccionCursor, EventoEditor, SeveridadRender, SpanTexto,
 };
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 
 fn main() -> Result<()> {
@@ -65,16 +69,27 @@ fn main() -> Result<()> {
         Document::nuevo()
     };
 
+    // ── Plugin host — cargar tema desde Lua ───────────────────────────────
+    let mut host = HostPlugins::nuevo();
+    if let Err(e) = host.cargar_lua(plugin_theme::NOMBRE, plugin_theme::TEMA_SCRIPT) {
+        tracing::warn!("No se pudo cargar el tema Lua: {e} — usando tema por defecto");
+    }
+    host.inicializar();
+    host.al_abrir(ruta_archivo.as_ref().and_then(|p| p.to_str()));
+
     // ── Resaltador + lenguaje ─────────────────────────────────────────────
     let resaltador = Resaltador::nuevo();
     let lenguaje = lenguaje_del_doc(&ruta_archivo);
 
+    // ── Diagnósticos compartidos entre hilo LSP y event loop ─────────────
+    let diagnosticos_compartidos: Arc<Mutex<Vec<Diagnostic>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let diag_escritor = Arc::clone(&diagnosticos_compartidos);
+
     // ── Canal LSP: cambios del editor → hilo LSP ─────────────────────────
-    // El canal lleva (uri, texto_completo, versión)
     let (tx_lsp, rx_lsp) = tokio_mpsc::unbounded_channel::<(Url, String, i32)>();
 
     // ── Hilo LSP ──────────────────────────────────────────────────────────
-    // Corre un runtime Tokio independiente para no bloquear el event loop de winit.
     if let Some(ref ruta) = ruta_archivo {
         let ruta_lsp = ruta.canonicalize().unwrap_or_else(|_| ruta.clone());
         let uri = Url::from_file_path(&ruta_lsp).ok();
@@ -86,15 +101,21 @@ fn main() -> Result<()> {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("runtime tokio para LSP");
-            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp));
+            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp, diag_escritor));
         });
     }
 
-    // ── Versión del documento (para LSP didChange) ────────────────────────
+    // ── Versión del documento ─────────────────────────────────────────────
     let version_doc = Arc::new(AtomicI32::new(1));
 
     // ── Contenido inicial ─────────────────────────────────────────────────
-    let contenido_inicial = documento_a_contenido(&documento, &resaltador, lenguaje);
+    let contenido_inicial = documento_a_contenido(
+        &documento,
+        &resaltador,
+        lenguaje,
+        &host,
+        &diagnosticos_compartidos.lock().unwrap(),
+    );
 
     // ── Título de ventana ─────────────────────────────────────────────────
     let titulo = ruta_archivo
@@ -108,74 +129,67 @@ fn main() -> Result<()> {
         ..ConfigRenderer::default()
     };
 
-    // ── URI del documento abierto (para enviar al LSP tras cada cambio) ───
+    // ── URI del documento para el LSP ─────────────────────────────────────
     let uri_doc: Option<Url> = ruta_archivo
         .as_ref()
         .and_then(|r| r.canonicalize().ok())
         .and_then(|r| Url::from_file_path(r).ok());
 
+    let ruta_str: Option<String> = ruta_archivo
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .map(|s| s.to_string());
+
     // ── Event loop ────────────────────────────────────────────────────────
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
-        let texto_antes = match evento {
-            // Guardamos el estado antes de modificar para detectar cambios
+        let modifica_texto = matches!(
+            evento,
             EventoEditor::InsertarTexto(_)
-            | EventoEditor::BorrarAtras
-            | EventoEditor::BorrarAdelante => true,
-            _ => false,
-        };
+                | EventoEditor::BorrarAtras
+                | EventoEditor::BorrarAdelante
+                | EventoEditor::Deshacer
+                | EventoEditor::Rehacer
+        );
 
         match evento {
-            // ── Inserción ──────────────────────────────────────────────
             EventoEditor::InsertarTexto(texto) => {
                 if let Err(e) = documento.insertar_en_cursor(&texto) {
                     tracing::error!("Error insertando texto: {e}");
                     return None;
                 }
             }
-
-            // ── Borrado ────────────────────────────────────────────────
             EventoEditor::BorrarAtras => {
                 if let Err(e) = documento.borrar_antes_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
                 }
             }
-
             EventoEditor::BorrarAdelante => {
                 if let Err(e) = documento.borrar_despues_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
                 }
             }
-
-            // ── Movimiento ─────────────────────────────────────────────
-            EventoEditor::MoverCursor(direccion) => {
-                match direccion {
-                    DireccionCursor::Izquierda => documento.mover_cursor_izquierda(),
-                    DireccionCursor::Derecha => documento.mover_cursor_derecha(),
-                    DireccionCursor::Arriba => documento.mover_cursor_arriba(),
-                    DireccionCursor::Abajo => documento.mover_cursor_abajo(),
-                    DireccionCursor::InicioLinea => documento.mover_cursor_inicio_linea(),
-                    DireccionCursor::FinLinea => documento.mover_cursor_fin_linea(),
-                }
-            }
-
-            // ── Undo / Redo ────────────────────────────────────────────
+            EventoEditor::MoverCursor(direccion) => match direccion {
+                DireccionCursor::Izquierda => documento.mover_cursor_izquierda(),
+                DireccionCursor::Derecha => documento.mover_cursor_derecha(),
+                DireccionCursor::Arriba => documento.mover_cursor_arriba(),
+                DireccionCursor::Abajo => documento.mover_cursor_abajo(),
+                DireccionCursor::InicioLinea => documento.mover_cursor_inicio_linea(),
+                DireccionCursor::FinLinea => documento.mover_cursor_fin_linea(),
+            },
             EventoEditor::Deshacer => {
                 if let Err(e) = documento.deshacer() {
                     tracing::error!("Error al deshacer: {e}");
                     return None;
                 }
             }
-
             EventoEditor::Rehacer => {
                 if let Err(e) = documento.rehacer() {
                     tracing::error!("Error al rehacer: {e}");
                     return None;
                 }
             }
-
-            // ── Guardar ────────────────────────────────────────────────
             EventoEditor::Guardar => {
                 let ruta = documento.buffer.ruta.clone();
                 match ruta {
@@ -185,6 +199,7 @@ fn main() -> Result<()> {
                             Ok(()) => {
                                 documento.buffer.marcar_guardado();
                                 tracing::info!("Guardado: {}", ruta.display());
+                                host.al_guardar(ruta.to_str());
                             }
                             Err(e) => tracing::error!("Error guardando {}: {e}", ruta.display()),
                         }
@@ -195,16 +210,18 @@ fn main() -> Result<()> {
             }
         }
 
-        // Notificar cambio de texto al LSP (solo en eventos que modifican contenido)
-        if texto_antes {
+        // Notificar cambio al LSP y al plugin host
+        if modifica_texto {
             if let Some(ref uri) = uri_doc {
                 let version = version_doc.fetch_add(1, Ordering::Relaxed);
                 let texto = documento.buffer.contenido_completo();
                 let _ = tx_lsp.send((uri.clone(), texto, version));
+                host.al_cambiar(ruta_str.as_deref(), version as u32);
             }
         }
 
-        Some(documento_a_contenido(&documento, &resaltador, lenguaje))
+        let diags = diagnosticos_compartidos.lock().unwrap();
+        Some(documento_a_contenido(&documento, &resaltador, lenguaje, &host, &diags))
     })
 }
 
@@ -217,6 +234,7 @@ async fn hilo_lsp(
     texto_inicial: String,
     raiz: PathBuf,
     mut rx: tokio_mpsc::UnboundedReceiver<(Url, String, i32)>,
+    diag_escritor: Arc<Mutex<Vec<Diagnostic>>>,
 ) {
     let mut cliente = match ClienteLsp::conectar("rust-analyzer", &[], &raiz).await {
         Ok(c) => c,
@@ -226,7 +244,6 @@ async fn hilo_lsp(
         }
     };
 
-    // Abrir documento inicial
     if let Some(ref uri) = uri {
         if let Err(e) = cliente.abrir_documento(uri.clone(), &texto_inicial, 0).await {
             tracing::warn!("LSP didOpen falló: {e}");
@@ -235,7 +252,6 @@ async fn hilo_lsp(
 
     loop {
         tokio::select! {
-            // Cambio de documento desde el editor
             msg = rx.recv() => {
                 match msg {
                     Some((uri, texto, version)) => {
@@ -243,15 +259,14 @@ async fn hilo_lsp(
                             tracing::warn!("LSP didChange falló: {e}");
                         }
                     }
-                    None => break, // canal cerrado (editor terminó)
+                    None => break,
                 }
             }
-
-            // Notificación del servidor LSP
             Some(notif) = cliente.rx_notificacion.recv() => {
                 match notif {
                     Notificacion::Diagnosticos(params) => {
                         registrar_diagnosticos(&params.diagnostics);
+                        *diag_escritor.lock().unwrap() = params.diagnostics;
                     }
                 }
             }
@@ -259,21 +274,17 @@ async fn hilo_lsp(
     }
 }
 
-/// Escribe los diagnósticos en el log. Milestone 3 los mostrará en el renderer.
 fn registrar_diagnosticos(diags: &[Diagnostic]) {
-    if diags.is_empty() {
-        return;
-    }
     for d in diags {
         let nivel = match d.severity {
-            Some(DiagnosticSeverity::ERROR)   => "ERROR",
-            Some(DiagnosticSeverity::WARNING) => "WARN",
+            Some(DiagnosticSeverity::ERROR)       => "ERROR",
+            Some(DiagnosticSeverity::WARNING)     => "WARN",
             Some(DiagnosticSeverity::INFORMATION) => "INFO",
-            _ => "HINT",
+            _                                     => "HINT",
         };
-        let linea = d.range.start.line + 1;
-        let col   = d.range.start.character + 1;
-        tracing::warn!("[LSP {nivel}] {linea}:{col} — {}", d.message);
+        let l = d.range.start.line + 1;
+        let c = d.range.start.character + 1;
+        tracing::warn!("[LSP {nivel}] {l}:{c} — {}", d.message);
     }
 }
 
@@ -285,6 +296,8 @@ fn documento_a_contenido(
     doc: &Document,
     resaltador: &Resaltador,
     lenguaje: Lenguaje,
+    host: &HostPlugins,
+    diagnosticos_lsp: &[Diagnostic],
 ) -> ContenidoRender {
     let cursor = doc.cursor_principal();
     let texto_completo = doc.buffer.contenido_completo();
@@ -298,13 +311,36 @@ fn documento_a_contenido(
         lineas
     };
 
+    // Sintaxis con colores del tema activo en el host
     let spans: Vec<SpanTexto> = resaltador
         .resaltar(&texto_completo, lenguaje)
         .into_iter()
         .map(|s| SpanTexto {
             inicio_byte: s.inicio_byte,
             fin_byte: s.fin_byte,
-            color: tipo_a_color(s.tipo),
+            color: tipo_a_color(s.tipo, host),
+        })
+        .collect();
+
+    // Diagnósticos LSP → byte positions
+    let diagnosticos: Vec<DiagnosticoRender> = diagnosticos_lsp
+        .iter()
+        .map(|d| {
+            let inicio_byte =
+                posicion_lsp_a_byte(&lineas, d.range.start.line, d.range.start.character);
+            let fin_byte =
+                posicion_lsp_a_byte(&lineas, d.range.end.line, d.range.end.character);
+            DiagnosticoRender {
+                inicio_byte,
+                fin_byte: fin_byte.max(inicio_byte + 1),
+                severidad: match d.severity {
+                    Some(DiagnosticSeverity::ERROR)       => SeveridadRender::Error,
+                    Some(DiagnosticSeverity::WARNING)     => SeveridadRender::Aviso,
+                    Some(DiagnosticSeverity::INFORMATION) => SeveridadRender::Informacion,
+                    _                                     => SeveridadRender::Sugerencia,
+                },
+                mensaje: d.message.clone(),
+            }
         })
         .collect();
 
@@ -316,28 +352,31 @@ fn documento_a_contenido(
         }),
         tamano_fuente: 16.0,
         spans,
+        diagnosticos,
     }
 }
 
 // ------------------------------------------------------------------
-// Tema One Dark
+// Tema — usa colores del HostPlugins en lugar de valores hardcodeados
 // ------------------------------------------------------------------
 
-fn tipo_a_color(tipo: TipoResaltado) -> ColorRender {
-    match tipo {
-        TipoResaltado::PalabraClave   => ColorRender::rgb(0xC6, 0x78, 0xDD),
-        TipoResaltado::CadenaTexto    => ColorRender::rgb(0x98, 0xC3, 0x79),
-        TipoResaltado::Comentario     => ColorRender::rgb(0x5C, 0x63, 0x70),
-        TipoResaltado::Funcion        => ColorRender::rgb(0x61, 0xAF, 0xEF),
-        TipoResaltado::Tipo           => ColorRender::rgb(0xE5, 0xC0, 0x7B),
-        TipoResaltado::Numero         => ColorRender::rgb(0xD1, 0x9A, 0x66),
-        TipoResaltado::Operador       => ColorRender::rgb(0x56, 0xB6, 0xC2),
-        TipoResaltado::Variable       => ColorRender::rgb(0xE0, 0x6C, 0x75),
-        TipoResaltado::Constante      => ColorRender::rgb(0xD1, 0x9A, 0x66),
-        TipoResaltado::Puntuacion     => ColorRender::rgb(0xAB, 0xB2, 0xBF),
-        TipoResaltado::Atributo       => ColorRender::rgb(0xE5, 0xC0, 0x7B),
-        TipoResaltado::Predeterminado => ColorRender::rgb(0xAB, 0xB2, 0xBF),
-    }
+fn tipo_a_color(tipo: TipoResaltado, host: &HostPlugins) -> ColorRender {
+    let clave = match tipo {
+        TipoResaltado::PalabraClave   => "keyword",
+        TipoResaltado::CadenaTexto    => "string",
+        TipoResaltado::Comentario     => "comment",
+        TipoResaltado::Funcion        => "function",
+        TipoResaltado::Tipo           => "type",
+        TipoResaltado::Numero         => "number",
+        TipoResaltado::Operador       => "operator",
+        TipoResaltado::Variable       => "variable",
+        TipoResaltado::Constante      => "constant",
+        TipoResaltado::Puntuacion     => "punctuation",
+        TipoResaltado::Atributo       => "attribute",
+        TipoResaltado::Predeterminado => "default",
+    };
+    let [r, g, b] = host.color(clave);
+    ColorRender::rgb(r, g, b)
 }
 
 // ------------------------------------------------------------------
@@ -350,4 +389,23 @@ fn lenguaje_del_doc(ruta: &Option<PathBuf>) -> Lenguaje {
         .and_then(|e| e.to_str())
         .map(Lenguaje::desde_extension)
         .unwrap_or(Lenguaje::Desconocido)
+}
+
+/// Convierte una posición LSP (línea, carácter UTF-16) a byte offset
+/// en el string `lineas.join("\n")`.
+fn posicion_lsp_a_byte(lineas: &[String], linea: u32, caracter_utf16: u32) -> usize {
+    let li = (linea as usize).min(lineas.len().saturating_sub(1));
+    let mut offset: usize = lineas[..li].iter().map(|l| l.len() + 1).sum();
+
+    if let Some(linea_str) = lineas.get(li) {
+        let mut utf16_count = 0u32;
+        for (byte_idx, ch) in linea_str.char_indices() {
+            if utf16_count >= caracter_utf16 {
+                return offset + byte_idx;
+            }
+            utf16_count += ch.len_utf16() as u32;
+        }
+        offset += linea_str.len();
+    }
+    offset
 }

@@ -6,7 +6,10 @@ authors.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 rust-version.workspace = true
-description = "Runtime de plugins Lua + WASM — pendiente Milestone 3"
+description = "Runtime de plugins Lua para el editor Glyph"
 
-# Sin dependencias hasta Milestone 3
 [dependencies]
+glyph-plugin-api = { path = "../glyph-plugin-api" }
+mlua             = { workspace = true }
+anyhow           = { workspace = true }
+tracing          = { workspace = true }

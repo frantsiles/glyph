@@ -28,7 +28,9 @@ mod renderer;
 mod texto;
 
 pub use configuracion::ConfigRenderer;
-pub use contenido::{ColorRender, ContenidoRender, CursorRender, SpanTexto};
+pub use contenido::{
+    ColorRender, ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto,
+};
 pub use eventos::{DireccionCursor, EventoEditor};
 pub use renderer::Renderer;
 

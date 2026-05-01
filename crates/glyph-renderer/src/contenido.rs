@@ -34,6 +34,26 @@ pub struct SpanTexto {
     pub color: ColorRender,
 }
 
+/// Severidad de un diagnóstico LSP
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeveridadRender {
+    Error,
+    Aviso,
+    Informacion,
+    Sugerencia,
+}
+
+/// Diagnóstico LSP convertido a coordenadas de bytes (listo para el renderer).
+#[derive(Debug, Clone)]
+pub struct DiagnosticoRender {
+    /// Byte de inicio en el texto completo
+    pub inicio_byte: usize,
+    /// Byte de fin en el texto completo (al menos inicio_byte + 1)
+    pub fin_byte: usize,
+    pub severidad: SeveridadRender,
+    pub mensaje: String,
+}
+
 /// Posición del cursor para renderizar (independiente de `glyph_core::Posicion`)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CursorRender {
@@ -57,6 +77,9 @@ pub struct ContenidoRender {
 
     /// Spans de sintaxis coloreados — vacío si no hay resaltado activo
     pub spans: Vec<SpanTexto>,
+
+    /// Diagnósticos LSP — sobreescriben el color de sintaxis en su rango
+    pub diagnosticos: Vec<DiagnosticoRender>,
 }
 
 impl ContenidoRender {
@@ -67,6 +90,7 @@ impl ContenidoRender {
             cursor: Some(CursorRender::default()),
             tamano_fuente: 16.0,
             spans: Vec::new(),
+            diagnosticos: Vec::new(),
         }
     }
 
