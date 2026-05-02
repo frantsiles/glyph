@@ -8,6 +8,9 @@ M.nombre      = "One Dark"
 M.descripcion = "Tema oscuro basado en One Dark de Atom"
 M.version     = "1.0.0"
 
+-- Permisos declarados: solo UI (cambiar colores del tema)
+M.permisos = { ui = true }
+
 function M.tema()
     return {
         -- Sintaxis

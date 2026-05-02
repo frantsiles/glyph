@@ -11,5 +11,8 @@ description = "Runtime de plugins Lua para el editor Glyph"
 [dependencies]
 glyph-plugin-api = { path = "../glyph-plugin-api" }
 mlua             = { workspace = true }
+wasmtime         = { workspace = true }
 anyhow           = { workspace = true }
 tracing          = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }

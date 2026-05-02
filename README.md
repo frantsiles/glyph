@@ -38,10 +38,11 @@ Glyph es un editor de código de escritorio multiplataforma construido desde cer
 | Gramática Python | `tree-sitter-python` | 0.21 | Compatible con tree-sitter 0.22 |
 | Tipos LSP | `lsp-types` | 0.95 | Mensajes JSON-RPC estándar para el cliente LSP |
 | Runtime async | `tokio` | 1 | El cliente LSP corre en un hilo independiente |
-| Serialización | `serde` + `serde_json` | 1 | Mensajes LSP y configuración |
+| Serialización | `serde` + `serde_json` | 1 | Mensajes LSP, metadata de plugins WASM y configuración |
 | Logging | `tracing` + `tracing-subscriber` | 0.1 / 0.3 | Niveles de log configurables con `RUST_LOG` |
 | Errores | `anyhow` | 1 | Propagación ergonómica de errores en código de aplicación |
-| Runtime de plugins | `mlua` | 0.9 | Lua embebido (vendored); `wasmtime` para WASM en Milestone 4 |
+| Runtime de plugins Lua | `mlua` | 0.9 | Lua embebido (vendored); sandbox granular por permisos |
+| Runtime de plugins WASM | `wasmtime` | 20 | Sandbox seguro para plugins compilados a `wasm32-unknown-unknown` |
 
 ---
 
@@ -92,20 +93,41 @@ Cliente JSON-RPC asíncrono para servidores LSP.
 
 Contratos públicos del SDK. Define el trait `Plugin` con hooks opcionales (`inicializar`, `al_cambiar`, `al_guardar`, `al_abrir`) y `AccionPlugin` (lo que un plugin puede devolver al editor: `EstablecerTema`, `LogMensaje`). Sin dependencias de UI.
 
+El trait incluye `fn permisos(&self) -> Permisos` (defecto: solo `ui`). La struct `Permisos` tiene cinco capacidades: `ui`, `leer_archivos`, `escribir_archivos`, `ejecutar_procesos`, `red`. El plugin las declara en su tabla Lua como `M.permisos = { ui = true }`.
+
 ### glyph-plugin-host
 
-Orquesta el ciclo de vida de los plugins. `HostPlugins`:
-- `cargar_lua(nombre, script)` — carga un script Lua como plugin usando `mlua`
-- `inicializar()` — llama `Plugin::inicializar()` en todos los plugins y aplica sus acciones
+Orquesta el ciclo de vida de todos los plugins. `HostPlugins`:
+- `cargar_lua(nombre, script)` — carga un script Lua, lee `M.permisos`, aplica sandbox y registra el plugin
+- `cargar_wasm(ruta)` — carga un archivo `.wasm`, lee metadatos vía `glyph_metadata()` y registra el plugin
+- `cargar_wasm_bytes(nombre, bytes)` — variante en memoria para tests y embed
+- `inicializar()` — llama `Plugin::inicializar()` en todos los plugins y aplica sus acciones verificando permisos
 - `color(clave)` — devuelve el color RGB activo para una clave semántica (`"keyword"`, `"string"`, etc.)
 
-Internamente, `PluginLua` envuelve un `mlua::Lua` + `RegistryKey` al módulo cargado. Los hooks de Lua se llaman por nombre si existen en la tabla devuelta por el script.
+**Sandbox Lua** — `PluginLua` lee los permisos declarados antes del sandbox, luego elimina de `lua.globals()` las APIs no declaradas: `io`/`dofile`/`loadfile` sin `leer_archivos`, `require`/`load` sin `leer_archivos`, y `os.execute/exit/remove/rename` sin `ejecutar_procesos`.
+
+**ABI WASM** — `PluginWasm` usa `wasmtime` con el core API (no component model). El plugin WASM debe exportar:
+- `glyph_alloc(size: i32) -> i32` — el host escribe strings aquí
+- `glyph_metadata() -> i32` — puntero a JSON `[u32-LE len][UTF-8]` con nombre y permisos
+- `glyph_inicializar() -> i32`, `glyph_al_abrir/cambiar/guardar(...)  -> i32` — listas de `AccionJson`
+
+El host provee al módulo `env::glyph_log(ptr, len)` para logging desde el plugin.
+
+La acción `EstablecerTema` es rechazada en tiempo de ejecución si el plugin no declaró `ui = true`, tanto en plugins Lua como WASM.
 
 ### plugin-theme
 
 Plugin oficial de temas escrito en Lua (`init.lua`). El script se embebe en el binario con `include_str!`. Define el tema **One Dark** como una tabla `{ keyword = "#C678DD", string = "#98C379", ... }` devuelta por `M.tema()`. El host lee la tabla al inicializar y la convierte en el mapa de colores activo.
 
-Para personalizar el tema: cargar un script Lua propio con las mismas claves.
+### plugin-wasm-monokai
+
+Plugin oficial de temas compilado a WASM. Implementa el ABI completo (`glyph_alloc`, `glyph_metadata`, `glyph_inicializar`, los tres hooks de eventos) y devuelve la paleta **Monokai** clásica al inicializar. Sirve de referencia para autores de plugins en cualquier lenguaje que compile a `wasm32-unknown-unknown`.
+
+Para compilar:
+```bash
+cd plugins/plugin-wasm-monokai
+cargo build --target wasm32-unknown-unknown --release
+```
 
 ### glyph-app
 
@@ -150,11 +172,12 @@ glyph/
 │   ├── glyph-renderer/         # Ventana, GPU, event loop (winit + wgpu + glyphon)
 │   ├── glyph-lsp/              # Cliente LSP asíncrono (tokio + lsp-types)
 │   ├── glyph-plugin-api/       # Trait Plugin, AccionPlugin, ContextoPlugin
-│   ├── glyph-plugin-host/      # Runtime Lua (mlua); WASM pendiente Milestone 4
+│   ├── glyph-plugin-host/      # Runtime Lua (mlua) + WASM (wasmtime)
 │   └── glyph-app/              # Binario: orquesta todos los crates
 │
 └── plugins/                    # Plugins oficiales (usan la misma API que terceros)
     ├── plugin-theme/            # Tema One Dark — Lua embebido (init.lua)
+    ├── plugin-wasm-monokai/     # Tema Monokai — plugin WASM de referencia
     ├── plugin-git/              # Integración Git — pendiente
     └── plugin-formatter/        # Formateo de código — pendiente
 ```
@@ -243,7 +266,7 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Diagnósticos recibidos y registrados en log
 - [x] Búsqueda en buffer (Ctrl+F) con navegación entre resultados
 
-### Milestone 3 — Plugin System ✅ (parcial)
+### Milestone 3 — Plugin System ✅
 - [x] Trait `Plugin` y `AccionPlugin` en `glyph-plugin-api`
 - [x] `HostPlugins` con soporte Lua (`mlua`) en `glyph-plugin-host`
 - [x] Tema One Dark como plugin Lua (`plugin-theme/init.lua`)
@@ -258,14 +281,12 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Números de línea (gutter) con resaltado de línea activa
 - [x] Syntax highlighting para JavaScript (`.js`, `.mjs`) y Python (`.py`)
 - [x] Popup de hover LSP (Ctrl+K) — texto flotante sobre el cursor con tipo y documentación
-- [ ] Sistema de permisos declarativo por plugin
-- [ ] Plugin host WASM con `wasmtime`
-- [ ] WIT API v1 — contratos para plugins compilados
+- [x] Sistema de permisos declarativo (`Permisos`) — sandbox Lua + enforcement de acciones
 
-### Milestone 4 — Plugin System avanzado + IA
-- [ ] Plugin host WASM con `wasmtime` (sandboxed, cualquier lenguaje)
-- [ ] WIT API v1 — contratos de extensión para plugins compilados
-- [ ] Sistema de permisos declarativo por plugin
+### Milestone 4 — Plugin System avanzado + IA (en progreso)
+- [x] Plugin host WASM con `wasmtime` (sandboxed, `wasm32-unknown-unknown`)
+- [x] WIT API v1 — spec de contratos en `glyph-plugin-api/wit/plugin.wit`
+- [x] Plugin de referencia WASM: tema Monokai (`plugins/plugin-wasm-monokai`)
 - [ ] Provider pattern para modelos de IA
 - [ ] Soporte Ollama (inferencia local/privada)
 - [ ] Routing de IA por tipo de archivo

@@ -12,6 +12,73 @@
 use std::collections::HashMap;
 
 // ------------------------------------------------------------------
+// Permisos — declaración de capacidades que el plugin necesita
+// ------------------------------------------------------------------
+
+/// Capacidades que un plugin debe declarar para que el host las conceda.
+///
+/// El host aplica estas restricciones al cargar el plugin. Un plugin
+/// que no declara un permiso no puede usarlo aunque su código lo intente.
+#[derive(Debug, Clone)]
+pub struct Permisos {
+    /// Puede modificar la UI (temas, decoraciones). Habilitado por defecto.
+    pub ui: bool,
+    /// Puede leer archivos del disco.
+    pub leer_archivos: bool,
+    /// Puede escribir archivos en el disco.
+    pub escribir_archivos: bool,
+    /// Puede lanzar subprocesos (`os.execute` en Lua, etc.).
+    pub ejecutar_procesos: bool,
+    /// Puede realizar peticiones de red (reservado para Milestone 4).
+    pub red: bool,
+}
+
+impl Default for Permisos {
+    /// Permisos mínimos: solo UI. Suficiente para un plugin de temas.
+    fn default() -> Self {
+        Self {
+            ui: true,
+            leer_archivos: false,
+            escribir_archivos: false,
+            ejecutar_procesos: false,
+            red: false,
+        }
+    }
+}
+
+impl Permisos {
+    /// Sin ningún permiso (útil como punto de partida para construir permisos mínimos).
+    pub fn ninguno() -> Self {
+        Self {
+            ui: false,
+            ..Default::default()
+        }
+    }
+
+    /// Todos los permisos habilitados (solo para plugins internos de confianza).
+    pub fn todos() -> Self {
+        Self {
+            ui: true,
+            leer_archivos: true,
+            escribir_archivos: true,
+            ejecutar_procesos: true,
+            red: true,
+        }
+    }
+
+    /// Resumen legible de los permisos concedidos, para logging.
+    pub fn resumen(&self) -> String {
+        let mut caps: Vec<&str> = Vec::new();
+        if self.ui { caps.push("ui"); }
+        if self.leer_archivos { caps.push("leer_archivos"); }
+        if self.escribir_archivos { caps.push("escribir_archivos"); }
+        if self.ejecutar_procesos { caps.push("ejecutar_procesos"); }
+        if self.red { caps.push("red"); }
+        if caps.is_empty() { "ninguno".to_string() } else { caps.join(", ") }
+    }
+}
+
+// ------------------------------------------------------------------
 // Contexto — lo que el plugin recibe en cada hook
 // ------------------------------------------------------------------
 
@@ -53,6 +120,12 @@ pub trait Plugin: Send + 'static {
 
     fn descripcion(&self) -> &str {
         ""
+    }
+
+    /// Permisos que el plugin declara necesitar.
+    /// El host los lee al cargar el plugin y aplica el sandbox correspondiente.
+    fn permisos(&self) -> Permisos {
+        Permisos::default()
     }
 
     /// Se llama una vez al cargar el plugin. Ideal para registrar temas,

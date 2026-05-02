@@ -1,0 +1,98 @@
+// WIT API v1 — Glyph Plugin Interface
+// Package: glyph:plugin@0.1.0
+//
+// Este archivo define el contrato entre el editor Glyph y sus plugins WASM.
+// En esta versión (M4 MVP) se usa como especificación de referencia;
+// el host implementa el ABI equivalente manualmente sobre wasmtime.
+// En una versión futura se usará wit-bindgen para generar los bindings.
+//
+// ABI binario actual (wasm32-unknown-unknown, no component model):
+//
+//   Exports que el plugin WASM debe implementar:
+//     glyph_alloc(size: i32) -> i32
+//       Alloca `size` bytes en la memoria del plugin; retorna el puntero.
+//       El host lo usa para escribir strings (rutas de archivo) en el módulo.
+//
+//     glyph_metadata() -> i32
+//       Retorna ptr a [u32-LE len][UTF-8 JSON]:
+//       {"nombre":"...","descripcion":"...","permisos":{"ui":bool,...}}
+//
+//     glyph_inicializar() -> i32
+//       Retorna ptr a [u32-LE len][UTF-8 JSON] lista de AccionJson.
+//
+//     glyph_al_abrir(ruta_ptr: i32, ruta_len: i32) -> i32
+//     glyph_al_cambiar(ruta_ptr: i32, ruta_len: i32, version: i32) -> i32
+//     glyph_al_guardar(ruta_ptr: i32, ruta_len: i32) -> i32
+//       Reciben la ruta del archivo activo como bytes UTF-8 en la memoria
+//       del módulo (el host escribe vía glyph_alloc). Retornan lista de AccionJson.
+//
+//   Imports que el host provee al plugin WASM (namespace "env"):
+//     glyph_log(ptr: i32, len: i32)
+//       Escribe `len` bytes UTF-8 en ptr como mensaje INFO en el log del editor.
+//
+//   Formato AccionJson (serde externo, sin envoltura):
+//     {"EstablecerTema": {"keyword":"#RRGGBB", "string":"#RRGGBB", ...}}
+//     {"LogMensaje": "texto libre"}
+//
+// ────────────────────────────────────────────────────────────────────
+// Definición WIT (referencia — no compilada en M4):
+// ────────────────────────────────────────────────────────────────────
+
+package glyph:plugin@0.1.0;
+
+/// Tipos compartidos entre host y plugins.
+interface tipos {
+    /// Capacidades que el plugin declara necesitar.
+    record permisos {
+        ui:                 bool,
+        leer-archivos:      bool,
+        escribir-archivos:  bool,
+        ejecutar-procesos:  bool,
+        red:                bool,
+    }
+
+    /// Color en espacio RGB.
+    record color { r: u8, g: u8, b: u8 }
+
+    /// Entrada de tema: nombre semántico y color.
+    record entrada-tema { clave: string, color: color }
+
+    /// Acciones que un plugin puede devolver al editor.
+    variant accion {
+        /// Reemplaza el tema activo con la paleta indicada.
+        establecer-tema(list<entrada-tema>),
+        /// Emite un mensaje al log del editor.
+        log-mensaje(string),
+    }
+}
+
+/// Funciones que el host provee al plugin WASM.
+interface host {
+    use tipos.{accion};
+    /// Registra un mensaje en el log del editor.
+    log: func(nivel: string, mensaje: string);
+}
+
+/// Interfaz que todo plugin WASM debe exportar.
+interface plugin {
+    use tipos.{permisos, accion};
+
+    nombre:             func() -> string;
+    descripcion:        func() -> string;
+    obtener-permisos:   func() -> permisos;
+
+    /// Llamado una vez al registrar el plugin.
+    inicializar:    func() -> list<accion>;
+    /// Llamado tras cada modificación del documento activo.
+    al-cambiar:     func(ruta: option<string>, version: u32) -> list<accion>;
+    /// Llamado después de guardar el documento.
+    al-guardar:     func(ruta: option<string>) -> list<accion>;
+    /// Llamado al abrir un archivo.
+    al-abrir:       func(ruta: option<string>) -> list<accion>;
+}
+
+/// El componente WASM de un plugin debe exportar este world.
+world plugin-glyph {
+    import host;
+    export plugin;
+}

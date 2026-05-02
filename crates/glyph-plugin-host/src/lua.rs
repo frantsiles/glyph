@@ -3,22 +3,29 @@
 
 //! Adaptador Lua → `Plugin`.
 //!
-//! Un script Lua válido debe retornar una tabla con al menos `nombre`.
-//! Hooks opcionales: `inicializar()`, `al_cambiar(ruta)`, `al_guardar(ruta)`,
-//! `al_abrir(ruta)`. El hook especial `tema()` retorna una tabla de colores.
+//! Un script Lua válido debe retornar una tabla con al menos `nombre` y
+//! `permisos`. Hooks opcionales: `inicializar()`, `al_cambiar(ruta)`,
+//! `al_guardar(ruta)`, `al_abrir(ruta)`. El hook especial `tema()` retorna
+//! una tabla de colores.
+//!
+//! ## Permisos y sandbox
+//!
+//! Al cargar el script, el host lee `M.permisos` y aplica un sandbox
+//! que elimina las APIs peligrosas no declaradas:
+//!
+//! - Sin `leer_archivos` ni `escribir_archivos`: se elimina `io`, `dofile`, `loadfile`
+//! - Sin `ejecutar_procesos`: `os` queda reducido a funciones de tiempo seguras
+//! - Sin `leer_archivos`: se elimina `require` y `load`
 //!
 //! ## Ejemplo de script Lua
 //!
 //! ```lua
 //! local M = {}
-//! M.nombre = "mi-plugin"
+//! M.nombre   = "mi-plugin"
+//! M.permisos = { ui = true }
 //!
 //! function M.tema()
 //!     return { keyword = "#C678DD", string = "#98C379" }
-//! end
-//!
-//! function M.al_guardar(ruta)
-//!     -- hacer algo al guardar
 //! end
 //!
 //! return M
@@ -26,24 +33,36 @@
 
 use std::collections::HashMap;
 
-use mlua::{Function, Lua, RegistryKey, Table};
+use mlua::{Function, Lua, RegistryKey, Table, Value};
 
-use glyph_plugin_api::{AccionPlugin, ContextoPlugin, Plugin};
+use glyph_plugin_api::{AccionPlugin, ContextoPlugin, Permisos, Plugin};
 
 pub(crate) struct PluginLua {
     lua: Lua,
     nombre: String,
     key_modulo: RegistryKey,
+    permisos: Permisos,
 }
 
 impl PluginLua {
-    /// Carga un script Lua desde un string y lo inicializa.
+    /// Carga un script Lua, lee sus permisos declarados y aplica el sandbox.
     pub fn desde_str(nombre: &str, script: &str) -> anyhow::Result<Self> {
         let lua = Lua::new();
+
         let tabla: Table<'_> = lua
             .load(script)
             .eval()
             .map_err(|e| anyhow::anyhow!("Error cargando plugin '{nombre}': {e}"))?;
+
+        // 1. Leer permisos antes de sandboxear
+        let permisos = leer_permisos_lua(&tabla);
+        tracing::info!(
+            "[plugin '{nombre}'] permisos declarados: {}",
+            permisos.resumen()
+        );
+
+        // 2. Aplicar sandbox: eliminar APIs no declaradas
+        aplicar_sandbox(&lua, &permisos)?;
 
         let key_modulo = lua
             .create_registry_value(tabla)
@@ -53,10 +72,11 @@ impl PluginLua {
             lua,
             nombre: nombre.to_string(),
             key_modulo,
+            permisos,
         })
     }
 
-    /// Intenta llamar un hook de la forma `function hook_name(ruta)`.
+    /// Llama un hook de la forma `function hook_name(ruta)`.
     fn llamar_hook(&self, nombre_fn: &str, ctx: &ContextoPlugin) -> Vec<AccionPlugin> {
         let Ok(tabla) = self.lua.registry_value::<Table<'_>>(&self.key_modulo) else {
             return vec![];
@@ -95,17 +115,22 @@ impl Plugin for PluginLua {
         &self.nombre
     }
 
+    fn permisos(&self) -> Permisos {
+        self.permisos.clone()
+    }
+
     fn inicializar(&mut self) -> Vec<AccionPlugin> {
         let mut acciones = Vec::new();
 
-        // Intentar cargar tema si el plugin lo provee
         if let Some(tema) = self.cargar_tema() {
-            tracing::info!("[plugin '{}'] tema cargado ({} entradas)", self.nombre, tema.len());
+            tracing::info!(
+                "[plugin '{}'] tema cargado ({} entradas)",
+                self.nombre,
+                tema.len()
+            );
             acciones.push(AccionPlugin::EstablecerTema(tema));
         }
 
-        // Llamar hook `inicializar()` si existe
-        let ctx = ContextoPlugin { ruta: None, version_doc: 0 };
         let Ok(tabla) = self.lua.registry_value::<Table<'_>>(&self.key_modulo) else {
             return acciones;
         };
@@ -115,7 +140,6 @@ impl Plugin for PluginLua {
                 tracing::warn!("[plugin '{}'] error en inicializar: {e}", self.nombre);
             }
         }
-        drop(ctx);
 
         acciones
     }
@@ -131,6 +155,60 @@ impl Plugin for PluginLua {
     fn al_abrir(&mut self, ctx: &ContextoPlugin) -> Vec<AccionPlugin> {
         self.llamar_hook("al_abrir", ctx)
     }
+}
+
+// ------------------------------------------------------------------
+// Sandbox
+// ------------------------------------------------------------------
+
+/// Lee la tabla `M.permisos` del módulo Lua. Si no existe, retorna los permisos por defecto.
+fn leer_permisos_lua(tabla: &Table) -> Permisos {
+    let Ok(t) = tabla.get::<_, Table>("permisos") else {
+        return Permisos::default();
+    };
+    Permisos {
+        ui:                 t.get("ui").unwrap_or(true),
+        leer_archivos:      t.get("leer_archivos").unwrap_or(false),
+        escribir_archivos:  t.get("escribir_archivos").unwrap_or(false),
+        ejecutar_procesos:  t.get("ejecutar_procesos").unwrap_or(false),
+        red:                t.get("red").unwrap_or(false),
+    }
+}
+
+/// Aplica restricciones al entorno Lua global basadas en los permisos declarados.
+///
+/// Limitación conocida: funciones capturadas en closures antes del sandbox
+/// no se ven afectadas. Para un sandbox hermético se usará wasmtime en M4.
+fn aplicar_sandbox(lua: &Lua, permisos: &Permisos) -> anyhow::Result<()> {
+    let globals = lua.globals();
+
+    // Sin acceso a archivos: eliminar io y funciones de carga de ficheros
+    if !permisos.leer_archivos && !permisos.escribir_archivos {
+        globals.set("io", Value::Nil)?;
+        globals.set("dofile", Value::Nil)?;
+        globals.set("loadfile", Value::Nil)?;
+    }
+
+    // Sin carga dinámica de código (require, load) salvo con leer_archivos
+    if !permisos.leer_archivos {
+        globals.set("require", Value::Nil)?;
+        globals.set("load", Value::Nil)?;
+    }
+
+    // Sin ejecución de procesos: reducir os a funciones de tiempo seguras
+    if !permisos.ejecutar_procesos {
+        if let Ok(os_completo) = globals.get::<_, Table>("os") {
+            let os_seguro = lua.create_table()?;
+            for fn_segura in &["time", "date", "clock", "difftime"] {
+                if let Ok(f) = os_completo.get::<_, Value>(*fn_segura) {
+                    os_seguro.set(*fn_segura, f)?;
+                }
+            }
+            globals.set("os", os_seguro)?;
+        }
+    }
+
+    Ok(())
 }
 
 // ------------------------------------------------------------------
