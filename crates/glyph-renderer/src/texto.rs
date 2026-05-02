@@ -5,7 +5,20 @@
 //!
 //! Renderiza texto usando `glyphon` (cosmic-text + wgpu).
 //!
-//! ## Jerarquía de color por fragmento
+//! ## Tres áreas de renderizado
+//!
+//! ```text
+//! ┌─ gutter ─┬─────── editor ──────────────────────────────┐
+//! │  1       │ fn main() {                                  │
+//! │  2       │     println!("hola");                        │
+//! │  3  ◄──  │ }                                            │
+//! │  4       │                                              │
+//! ├──────────┴──────────────────────────────────────────────┤
+//! │ main.rs | Ln 3, Col 1                                   │  ← barra
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Jerarquía de color por fragmento (editor)
 //!
 //! ```text
 //! 1. COLOR_TEXTO      (predeterminado)
@@ -15,14 +28,6 @@
 //! 5. Diagnóstico LSP  (sobreescribe sintaxis y matches en su rango)
 //! 6. Cursor           (sobreescribe todo en su carácter)
 //! ```
-//!
-//! ## Algoritmo de barrido de fronteras
-//!
-//! Todos los extremos de spans, diagnósticos, matches y cursor se convierten en
-//! "fronteras". El texto queda partido en segmentos entre fronteras
-//! consecutivas. Cada segmento recibe el color de mayor prioridad que
-//! lo cubre. Esto garantiza corrección con cualquier combinación de
-//! rangos solapados.
 
 use anyhow::{anyhow, Result};
 use glyphon::{
@@ -37,8 +42,14 @@ const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xCC, 0x00);
 const COLOR_MATCH: Color = Color::rgb(0xFF, 0xCC, 0x00);
 const COLOR_MATCH_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);
 const COLOR_TEXTO_BARRA: Color = Color::rgb(0x98, 0xA0, 0xAD);
+const COLOR_GUTTER: Color = Color::rgb(0x4B, 0x52, 0x63);
+const COLOR_GUTTER_ACTIVO: Color = Color::rgb(0xAB, 0xB2, 0xBF);
 
 const ALTURA_BARRA: f32 = 22.0;
+const MARGEN_SCROLL: i32 = 3;
+// Fracción del tamaño de fuente que ocupa un carácter monoespaciado en anchura
+const RATIO_CHAR: f32 = 0.601;
+const PADDING_GUTTER: f32 = 10.0; // padding izquierdo + derecho del gutter
 
 fn color_diagnostico(severidad: SeveridadRender) -> Color {
     match severidad {
@@ -49,9 +60,7 @@ fn color_diagnostico(severidad: SeveridadRender) -> Color {
     }
 }
 
-const MARGEN_SCROLL: i32 = 3; // líneas de contexto visibles sobre/bajo el cursor
-
-/// Encapsula el pipeline de renderizado de texto (editor + barra de estado).
+/// Encapsula el pipeline de renderizado de texto (gutter + editor + barra de estado).
 pub struct RendererTexto {
     sistema_fuentes: FontSystem,
     cache_formas: SwashCache,
@@ -59,9 +68,11 @@ pub struct RendererTexto {
     renderer: TextRenderer,
     buffer: Buffer,
     buffer_barra: Buffer,
+    buffer_gutter: Buffer,
     metricas: Metrics,
     metricas_barra: Metrics,
     scroll_linea: i32,
+    ancho_gutter: f32,
 }
 
 impl RendererTexto {
@@ -90,14 +101,30 @@ impl RendererTexto {
         let mut buffer_barra = Buffer::new(&mut sistema_fuentes, metricas_barra);
         buffer_barra.set_size(&mut sistema_fuentes, 1280.0, ALTURA_BARRA);
 
-        Self { sistema_fuentes, cache_formas, atlas, renderer, buffer, buffer_barra, metricas, metricas_barra, scroll_linea: 0 }
+        // El gutter usa las mismas métricas que el editor para alinearse visualmente
+        let mut buffer_gutter = Buffer::new(&mut sistema_fuentes, metricas);
+        buffer_gutter.set_size(&mut sistema_fuentes, 48.0, 720.0);
+
+        Self {
+            sistema_fuentes,
+            cache_formas,
+            atlas,
+            renderer,
+            buffer,
+            buffer_barra,
+            buffer_gutter,
+            metricas,
+            metricas_barra,
+            scroll_linea: 0,
+            ancho_gutter: 48.0,
+        }
     }
 
-    /// Actualiza el buffer de texto con el contenido del frame.
+    /// Actualiza los buffers de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
         let alto_editor = (alto - ALTURA_BARRA).max(1.0);
 
-        // Calcular scroll para mantener el cursor visible
+        // — Scroll tracking: mantener cursor visible ───────────────────────
         if let Some(cursor) = contenido.cursor {
             let cursor_line = cursor.linea as i32;
             let visible_lines = (alto_editor / self.metricas.line_height) as i32;
@@ -110,11 +137,51 @@ impl RendererTexto {
             }
         }
 
-        let Self { sistema_fuentes, buffer, buffer_barra, metricas, metricas_barra, scroll_linea, .. } = self;
+        // — Gutter (números de línea) ──────────────────────────────────────
+        let total_lineas = contenido.lineas.len().max(1);
+        let n_digitos = digitos(total_lineas);
+        let char_ancho = self.metricas.font_size * RATIO_CHAR;
+        self.ancho_gutter = (n_digitos as f32 * char_ancho) + PADDING_GUTTER;
+        let cursor_line = contenido.cursor.map(|c| c.linea as usize).unwrap_or(usize::MAX);
 
-        // — Editor principal —
+        let gutter_frags: Vec<(String, Attrs<'static>)> = (1..=total_lineas)
+            .map(|n| {
+                let s = format!("{:>width$}\n", n, width = n_digitos);
+                let color = if n - 1 == cursor_line {
+                    COLOR_GUTTER_ACTIVO
+                } else {
+                    COLOR_GUTTER
+                };
+                (s, Attrs::new().family(Family::Monospace).color(color))
+            })
+            .collect();
+
+        let Self {
+            sistema_fuentes,
+            buffer,
+            buffer_barra,
+            buffer_gutter,
+            metricas,
+            metricas_barra,
+            scroll_linea,
+            ancho_gutter,
+            ..
+        } = self;
+
+        buffer_gutter.set_metrics(sistema_fuentes, *metricas);
+        buffer_gutter.set_size(sistema_fuentes, *ancho_gutter, alto_editor);
+        buffer_gutter.set_scroll(*scroll_linea);
+        let gutter_refs: Vec<(&str, Attrs)> =
+            gutter_frags.iter().map(|(s, a)| (s.as_str(), *a)).collect();
+        buffer_gutter.set_rich_text(sistema_fuentes, gutter_refs, Shaping::Basic);
+        buffer_gutter.shape_until_scroll(sistema_fuentes);
+
+        // — Editor principal ───────────────────────────────────────────────
+        let texto_left = *ancho_gutter;
+        let ancho_editor = (ancho - texto_left).max(1.0);
+
         buffer.set_metrics(sistema_fuentes, *metricas);
-        buffer.set_size(sistema_fuentes, ancho, alto_editor);
+        buffer.set_size(sistema_fuentes, ancho_editor, alto_editor);
         buffer.set_scroll(*scroll_linea);
 
         let texto = contenido.texto_completo();
@@ -135,7 +202,7 @@ impl RendererTexto {
         buffer.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
         buffer.shape_until_scroll(sistema_fuentes);
 
-        // — Barra de estado —
+        // — Barra de estado ────────────────────────────────────────────────
         buffer_barra.set_metrics(sistema_fuentes, *metricas_barra);
         buffer_barra.set_size(sistema_fuentes, ancho, ALTURA_BARRA);
 
@@ -159,7 +226,19 @@ impl RendererTexto {
         self.atlas.trim();
 
         let alto_editor = (alto as i32) - ALTURA_BARRA as i32;
-        let Self { renderer, sistema_fuentes, atlas, buffer, buffer_barra, cache_formas, .. } = self;
+        let gutter_ancho_i = self.ancho_gutter as i32;
+        let texto_left = self.ancho_gutter;
+
+        let Self {
+            renderer,
+            sistema_fuentes,
+            atlas,
+            buffer,
+            buffer_barra,
+            buffer_gutter,
+            cache_formas,
+            ..
+        } = self;
 
         renderer
             .prepare(
@@ -169,19 +248,35 @@ impl RendererTexto {
                 atlas,
                 Resolution { width: ancho, height: alto },
                 [
+                    // 1. Gutter de números de línea
                     TextArea {
-                        buffer,
-                        left: 8.0,
+                        buffer: buffer_gutter,
+                        left: 4.0,
                         top: 8.0,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
+                            top: 0,
+                            right: gutter_ancho_i,
+                            bottom: alto_editor,
+                        },
+                        default_color: COLOR_GUTTER,
+                    },
+                    // 2. Editor de texto
+                    TextArea {
+                        buffer,
+                        left: texto_left + 4.0,
+                        top: 8.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: gutter_ancho_i,
                             top: 0,
                             right: ancho as i32,
                             bottom: alto_editor,
                         },
                         default_color: COLOR_TEXTO,
                     },
+                    // 3. Barra de estado
                     TextArea {
                         buffer: buffer_barra,
                         left: 8.0,
@@ -216,8 +311,7 @@ impl RendererTexto {
 // Algoritmo de barrido de fronteras
 // ------------------------------------------------------------------
 
-/// Construye fragmentos `(texto, Attrs)` respetando la jerarquía de color:
-/// predeterminado < sintaxis < match inactivo < match activo < diagnóstico < cursor.
+/// Construye fragmentos `(texto, Attrs)` respetando la jerarquía de color.
 fn construir_spans_glyphon(
     texto: &str,
     spans: &[SpanTexto],
@@ -237,7 +331,7 @@ fn construir_spans_glyphon(
         return vec![];
     }
 
-    // ── Paso 1: recopilar todas las fronteras ────────────────────────────
+    // ── Fronteras ────────────────────────────────────────────────────────
     let mut fronteras: Vec<usize> = vec![0, total];
 
     for s in spans {
@@ -269,7 +363,7 @@ fn construir_spans_glyphon(
     fronteras.sort_unstable();
     fronteras.dedup();
 
-    // ── Paso 2: precomputar rango del cursor ──────────────────────────────
+    // ── Rango cursor ─────────────────────────────────────────────────────
     let cursor_range: Option<(usize, usize)> = cursor_byte.map(|cb| {
         let cb = cb.min(total);
         if cb < total {
@@ -285,12 +379,11 @@ fn construir_spans_glyphon(
         }
     });
 
-    // Rango del match activo (para comparación rápida)
     let rango_match_activo: Option<(usize, usize)> = match_activo
         .and_then(|idx| matches.get(idx))
         .copied();
 
-    // ── Paso 3: asignar color a cada segmento ─────────────────────────────
+    // ── Asignar color a cada segmento ────────────────────────────────────
     let mut resultado: Vec<(String, Attrs<'static>)> = Vec::new();
 
     for w in fronteras.windows(2) {
@@ -298,14 +391,12 @@ fn construir_spans_glyphon(
         if seg_ini >= seg_fin || seg_fin > total {
             continue;
         }
-
         let mid = seg_ini;
 
         // Prioridad 6: cursor
         let es_cursor = cursor_range
             .map(|(cs, ce)| mid >= cs && mid < ce)
             .unwrap_or(false);
-
         if es_cursor {
             resultado.push((
                 texto[seg_ini..seg_fin].to_string(),
@@ -314,13 +405,12 @@ fn construir_spans_glyphon(
             continue;
         }
 
-        // Prioridad 5: diagnóstico (último que cubre mid gana)
+        // Prioridad 5: diagnóstico
         let color_diag = diagnosticos
             .iter()
             .rev()
             .find(|d| d.inicio_byte <= mid && d.fin_byte > mid)
             .map(|d| color_diagnostico(d.severidad));
-
         if let Some(color) = color_diag {
             resultado.push((
                 texto[seg_ini..seg_fin].to_string(),
@@ -341,8 +431,7 @@ fn construir_spans_glyphon(
         }
 
         // Prioridad 3: match inactivo
-        let es_match = matches.iter().any(|&(ms, me)| mid >= ms && mid < me);
-        if es_match {
+        if matches.iter().any(|&(ms, me)| mid >= ms && mid < me) {
             resultado.push((
                 texto[seg_ini..seg_fin].to_string(),
                 Attrs::new().family(Family::Monospace).color(COLOR_MATCH),
@@ -350,21 +439,22 @@ fn construir_spans_glyphon(
             continue;
         }
 
-        // Prioridad 2: span sintáctico (último que cubre mid gana)
+        // Prioridad 2: span sintáctico
         let color_sintax = spans
             .iter()
             .rev()
             .find(|s| s.inicio_byte <= mid && s.fin_byte > mid)
             .map(|s| Color::rgb(s.color.r, s.color.g, s.color.b));
 
-        let color = color_sintax.unwrap_or(COLOR_TEXTO);
         resultado.push((
             texto[seg_ini..seg_fin].to_string(),
-            Attrs::new().family(Family::Monospace).color(color),
+            Attrs::new()
+                .family(Family::Monospace)
+                .color(color_sintax.unwrap_or(COLOR_TEXTO)),
         ));
     }
 
-    // Cursor al final del documento (past-end): espacio sintético
+    // Cursor past-end
     if let Some((cs, _)) = cursor_range {
         if cs >= total {
             resultado.push((
@@ -381,8 +471,19 @@ fn construir_spans_glyphon(
 // Helpers
 // ------------------------------------------------------------------
 
+/// Número de dígitos decimales de `n` (mínimo 1).
+fn digitos(n: usize) -> usize {
+    if n == 0 { return 1; }
+    let mut d = 0;
+    let mut v = n;
+    while v > 0 {
+        d += 1;
+        v /= 10;
+    }
+    d
+}
+
 /// Byte offset del cursor en `lineas.join("\n")`.
-/// `cursor.columna` es índice de carácter (no byte); se convierte correctamente.
 fn cursor_byte_offset(lineas: &[String], cursor: CursorRender) -> usize {
     let linea = (cursor.linea as usize).min(lineas.len().saturating_sub(1));
     let offset: usize = lineas[..linea].iter().map(|l| l.len() + 1).sum();

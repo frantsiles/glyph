@@ -34,6 +34,8 @@ Glyph es un editor de código de escritorio multiplataforma construido desde cer
 | Buffer de texto | `ropey` | 1.6 | Estructura Rope — inserción/borrado O(log n) en archivos grandes |
 | Syntax highlighting | `tree-sitter` + `tree-sitter-highlight` | 0.22 | El mismo motor que Neovim y Zed; queries reutilizables |
 | Gramática Rust | `tree-sitter-rust` | 0.21 | Compatible con tree-sitter 0.22 |
+| Gramática JavaScript | `tree-sitter-javascript` | 0.21 | Compatible con tree-sitter 0.22 |
+| Gramática Python | `tree-sitter-python` | 0.21 | Compatible con tree-sitter 0.22 |
 | Tipos LSP | `lsp-types` | 0.95 | Mensajes JSON-RPC estándar para el cliente LSP |
 | Runtime async | `tokio` | 1 | El cliente LSP corre en un hilo independiente |
 | Serialización | `serde` + `serde_json` | 1 | Mensajes LSP y configuración |
@@ -72,7 +74,7 @@ Toda la lógica de presentación. No importa ningún tipo de `glyph-core`.
 
 - **`ContenidoRender`** — DTO (*Data Transfer Object*) que `glyph-app` construye a partir del `Document` y pasa al renderer. Contiene líneas de texto, posición del cursor, `Vec<SpanTexto>` (spans con `ColorRender` ya resuelto), `Vec<DiagnosticoRender>`, `matches_busqueda: Vec<(usize, usize)>`, `match_activo: Option<usize>` y `barra_estado: String`.
 - **`ContextoGpu`** — inicializa `wgpu` (instancia, adaptador, dispositivo, superficie). La ventana vive en un `Arc<Window>` para que `Surface<'static>` sea válida.
-- **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Mantiene dos buffers glyphon: uno para el editor (toda el área menos la barra inferior) y otro para la barra de estado (últimos 22px). Usa un algoritmo de **barrido de fronteras** para asignar colores por prioridad: `COLOR_TEXTO` < sintaxis < match inactivo < match activo < diagnóstico < cursor.
+- **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Gestiona tres buffers: gutter de números de línea (alineado al scroll del editor), editor principal y barra de estado. La línea activa del cursor se resalta en el gutter. Usa un algoritmo de **barrido de fronteras** para asignar colores por prioridad: `COLOR_TEXTO` < sintaxis < match inactivo < match activo < diagnóstico < cursor.
 - **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Gestiona dos modos internos (`Normal` y `Busqueda`) para enrutar las teclas correctamente: en modo búsqueda los caracteres actualizan la consulta en lugar de insertarse en el documento. Emite `EventoEditor` al manejador de la app.
 - **`EventoEditor`** — enum que describe la intención del usuario. Variantes de edición: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. Variantes de búsqueda: `IniciarBusqueda`, `ActualizarBusqueda(String)`, `SiguienteMatch`, `MatchAnterior`, `TerminarBusqueda`.
 
@@ -219,7 +221,7 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Undo/redo con historial de operaciones
 
 ### Milestone 2 — Inteligencia ✅
-- [x] Syntax highlighting con `tree-sitter` (Rust, extensible)
+- [x] Syntax highlighting con `tree-sitter` (Rust, JavaScript, Python)
 - [x] Tema One Dark aplicado sobre spans semánticos
 - [x] Cliente LSP asíncrono (`rust-analyzer`)
 - [x] `didOpen` / `didChange` enviados en cada edición
@@ -236,6 +238,8 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Barra de estado: nombre de archivo, posición del cursor, errores LSP y estado de búsqueda
 - [x] Scroll automático: el editor sigue al cursor con 3 líneas de contexto
 - [x] Navegación extendida: Page Up/Down, Ctrl+Home/End
+- [x] Números de línea (gutter) con resaltado de línea activa
+- [x] Syntax highlighting para JavaScript (`.js`, `.mjs`) y Python (`.py`)
 - [ ] Sistema de permisos declarativo por plugin
 - [ ] Plugin host WASM con `wasmtime`
 - [ ] WIT API v1 — contratos para plugins compilados
