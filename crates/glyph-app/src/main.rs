@@ -100,6 +100,8 @@ fn main() -> Result<()> {
         &documento,
         nombre_archivo.as_deref(),
         false,
+        false,
+        "",
         "",
         &[],
         0,
@@ -137,9 +139,11 @@ fn main() -> Result<()> {
         .and_then(|p| p.to_str())
         .map(|s| s.to_string());
 
-    // ── Estado de búsqueda (vive en el closure del event loop) ────────────
+    // ── Estado de búsqueda/reemplazo (vive en el closure del event loop) ──
     let mut en_busqueda = false;
+    let mut en_reemplazo = false;
     let mut consulta_actual = String::new();
+    let mut reemplazo_actual = String::new();
     let mut matches_actuales: Vec<(usize, usize)> = Vec::new();
     let mut match_activo: usize = 0;
 
@@ -151,6 +155,8 @@ fn main() -> Result<()> {
                 | EventoEditor::BorrarAdelante
                 | EventoEditor::Deshacer
                 | EventoEditor::Rehacer
+                | EventoEditor::ReemplazarMatch
+                | EventoEditor::ReemplazarTodo
         );
 
         match evento {
@@ -269,9 +275,51 @@ fn main() -> Result<()> {
             }
             EventoEditor::TerminarBusqueda => {
                 en_busqueda = false;
+                en_reemplazo = false;
                 consulta_actual.clear();
+                reemplazo_actual.clear();
                 matches_actuales.clear();
                 match_activo = 0;
+            }
+
+            // ── Reemplazo ─────────────────────────────────────────────
+            EventoEditor::IniciarReemplazo => {
+                en_busqueda = true;
+                en_reemplazo = true;
+                consulta_actual.clear();
+                reemplazo_actual.clear();
+                matches_actuales.clear();
+                match_activo = 0;
+            }
+            EventoEditor::ActualizarReemplazo(texto) => {
+                reemplazo_actual = texto;
+            }
+            EventoEditor::ReemplazarMatch => {
+                if !matches_actuales.is_empty() {
+                    let (ini, fin) = matches_actuales[match_activo];
+                    if let Err(e) = documento.reemplazar_bytes(ini, fin, &reemplazo_actual) {
+                        tracing::error!("Error reemplazando match: {e}");
+                    }
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                    if let Some(&(ini, _)) = matches_actuales.get(match_activo) {
+                        documento.mover_cursor_a_byte(ini);
+                    }
+                }
+            }
+            EventoEditor::ReemplazarTodo => {
+                if !matches_actuales.is_empty() {
+                    if let Err(e) = documento.reemplazar_todo_bytes(&matches_actuales.clone(), &reemplazo_actual) {
+                        tracing::error!("Error en reemplazar todo: {e}");
+                    }
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = 0;
+                }
+            }
+
+            // ── Click de ratón ────────────────────────────────────────
+            EventoEditor::MoverCursorA { linea, columna } => {
+                documento.mover_cursor_a(linea as usize, columna as usize);
             }
         }
 
@@ -294,7 +342,9 @@ fn main() -> Result<()> {
             &documento,
             nombre_archivo.as_deref(),
             en_busqueda,
+            en_reemplazo,
             &consulta_actual,
+            &reemplazo_actual,
             &matches_actuales,
             match_activo,
             n_errores,
@@ -465,12 +515,27 @@ fn construir_barra_estado(
     doc: &Document,
     nombre_archivo: Option<&str>,
     en_busqueda: bool,
+    en_reemplazo: bool,
     consulta: &str,
+    reemplazo: &str,
     matches: &[(usize, usize)],
     match_activo: usize,
     n_errores: usize,
 ) -> String {
-    if en_busqueda {
+    if en_reemplazo {
+        let resultados = if matches.is_empty() {
+            if consulta.is_empty() {
+                String::new()
+            } else {
+                " — sin resultados".to_string()
+            }
+        } else {
+            format!(" — {}/{}", match_activo + 1, matches.len())
+        };
+        format!(
+            "Buscar: \"{consulta}\"  →  \"{reemplazo}\"{resultados} | Enter: reemplazar, Ctrl+H: todo, Esc: salir"
+        )
+    } else if en_busqueda {
         if matches.is_empty() {
             if consulta.is_empty() {
                 "Buscar: _ | Enter: siguiente, Esc: salir".to_string()

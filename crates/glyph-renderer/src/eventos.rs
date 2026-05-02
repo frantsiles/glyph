@@ -60,6 +60,21 @@ pub enum EventoEditor {
     /// Saltar al resultado anterior (Shift+Enter en modo búsqueda)
     MatchAnterior,
 
-    /// Salir del modo búsqueda (Escape)
+    /// Salir del modo búsqueda/reemplazo (Escape)
     TerminarBusqueda,
+
+    /// Activar modo búsqueda+reemplazo (Ctrl+H)
+    IniciarReemplazo,
+
+    /// El usuario actualizó el texto de reemplazo
+    ActualizarReemplazo(String),
+
+    /// Reemplazar el match activo y avanzar al siguiente (Enter en modo reemplazo)
+    ReemplazarMatch,
+
+    /// Reemplazar todas las ocurrencias (Ctrl+H en modo reemplazo)
+    ReemplazarTodo,
+
+    /// Click del ratón — mover cursor a (línea, columna) en coordenadas de carácter
+    MoverCursorA { linea: u32, columna: u32 },
 }

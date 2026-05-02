@@ -317,6 +317,57 @@ impl Document {
         self.cursores[0].mover_a(linea, col, false);
     }
 
+    /// Mueve el cursor a (línea, columna) en coordenadas de carácter.
+    /// Satura al rango válido del documento.
+    pub fn mover_cursor_a(&mut self, linea: usize, columna: usize) {
+        let total = self.buffer.lineas();
+        let linea = linea.min(total.saturating_sub(1));
+        let max_col = self.longitud_linea(linea);
+        self.cursores[0].mover_a(linea, columna.min(max_col), false);
+    }
+
+    /// Reemplaza el rango de bytes `[inicio_byte, fin_byte)` con `nuevo`.
+    /// Registra la operación como un grupo de undo único.
+    pub fn reemplazar_bytes(&mut self, inicio_byte: usize, fin_byte: usize, nuevo: &str) -> Result<()> {
+        let ini = self.buffer.byte_a_char_idx(inicio_byte);
+        let fin = self.buffer.byte_a_char_idx(fin_byte);
+
+        let original = self.buffer.rango_texto(ini, fin);
+        self.historia.registrar(Operacion::Eliminar { indice: ini, texto: original });
+        self.historia.registrar(Operacion::Insertar { indice: ini, texto: nuevo.to_string() });
+        self.historia.confirmar_grupo();
+
+        self.buffer.reemplazar(ini, fin, nuevo);
+
+        let nuevo_fin = ini + nuevo.chars().count();
+        if let Ok((l, c)) = self.buffer.indice_a_posicion(nuevo_fin) {
+            self.cursores[0].mover_a(l, c, false);
+        }
+        Ok(())
+    }
+
+    /// Reemplaza todas las ocurrencias en `matches` con `nuevo`, procesando
+    /// de derecha a izquierda para que los byte offsets se mantengan válidos.
+    pub fn reemplazar_todo_bytes(&mut self, matches: &[(usize, usize)], nuevo: &str) -> Result<()> {
+        if matches.is_empty() {
+            return Ok(());
+        }
+        // Orden inverso: mayor offset primero para no invalidar los anteriores
+        let mut ordenados: Vec<(usize, usize)> = matches.to_vec();
+        ordenados.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (ini_b, fin_b) in &ordenados {
+            let ini = self.buffer.byte_a_char_idx(*ini_b);
+            let fin = self.buffer.byte_a_char_idx(*fin_b);
+            let original = self.buffer.rango_texto(ini, fin);
+            self.historia.registrar(Operacion::Eliminar { indice: ini, texto: original });
+            self.historia.registrar(Operacion::Insertar { indice: ini, texto: nuevo.to_string() });
+            self.buffer.reemplazar(ini, fin, nuevo);
+        }
+        self.historia.confirmar_grupo();
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Helpers privados
     // ------------------------------------------------------------------

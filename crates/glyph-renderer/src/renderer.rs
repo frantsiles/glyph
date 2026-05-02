@@ -5,46 +5,43 @@
 //!
 //! Event loop principal del editor (winit 0.29).
 //!
-//! ## Patrón manejador
-//!
-//! El renderer detecta eventos de teclado y los traduce a `EventoEditor`.
-//! Los delega a un closure `manejador: FnMut(EventoEditor) -> Option<ContenidoRender>`
-//! provisto por `glyph-app`. Si el manejador devuelve `Some(nuevo_contenido)`,
-//! el renderer actualiza la pantalla. El renderer no conoce `glyph-core`.
-//!
 //! ## Modos del renderer
 //!
-//! - **Normal**: edición de texto estándar.
-//! - **Busqueda**: Ctrl+F activa este modo. Las teclas alimentan la consulta de búsqueda
-//!   en lugar de insertarse en el documento. Escape vuelve al modo Normal.
+//! - **Normal** — edición de texto estándar.
+//! - **Busqueda** — Ctrl+F: los caracteres alimentan la consulta de búsqueda.
+//! - **Reemplazo** — Ctrl+H: dos campos (buscar/reemplazar). Tab cambia el campo activo.
 //!
-//! ## Teclas soportadas
+//! ## Teclas
 //!
-//! | Tecla           | Modo     | Evento                    |
+//! | Tecla          | Modo         | Evento                          |
 //! |---|---|---|
-//! | Caracteres      | Normal   | InsertarTexto             |
-//! | Enter           | Normal   | InsertarTexto("\n")       |
-//! | Tab             | Normal   | InsertarTexto("    ")     |
-//! | Backspace       | Normal   | BorrarAtras               |
-//! | Delete          | Normal   | BorrarAdelante            |
-//! | Flechas         | Normal   | MoverCursor               |
-//! | Home / End      | Normal   | InicioLinea / FinLinea    |
-//! | Ctrl+S          | Normal   | Guardar                   |
-//! | Ctrl+Z          | Normal   | Deshacer                  |
-//! | Ctrl+Y          | Normal   | Rehacer                   |
-//! | Ctrl+F          | Normal   | IniciarBusqueda           |
-//! | Caracteres      | Búsqueda | ActualizarBusqueda        |
-//! | Backspace       | Búsqueda | ActualizarBusqueda        |
-//! | Enter           | Búsqueda | SiguienteMatch            |
-//! | Shift+Enter     | Búsqueda | MatchAnterior             |
-//! | Escape          | Búsqueda | TerminarBusqueda          |
+//! | Caracteres     | Normal       | InsertarTexto                   |
+//! | Enter          | Normal       | InsertarTexto("\n")             |
+//! | Tab            | Normal       | InsertarTexto("    ")           |
+//! | Backspace      | Normal       | BorrarAtras                     |
+//! | Delete         | Normal       | BorrarAdelante                  |
+//! | Flechas        | Normal       | MoverCursor                     |
+//! | Home/End       | Normal       | InicioLinea/FinLinea            |
+//! | PgUp/PgDn      | Normal       | PaginaArriba/PaginaAbajo        |
+//! | Ctrl+Home/End  | Normal       | InicioDoc/FinDoc                |
+//! | Ctrl+S/Z/Y/F/H | Normal      | Guardar/Deshacer/Rehacer/...    |
+//! | Click izq.     | Normal       | MoverCursorA                    |
+//! | Caracteres     | Búsqueda     | ActualizarBusqueda              |
+//! | Enter          | Búsqueda     | SiguienteMatch                  |
+//! | Shift+Enter    | Búsqueda     | MatchAnterior                   |
+//! | Escape         | Búsqueda     | TerminarBusqueda                |
+//! | Caracteres     | Reemplazo    | ActualizarBusqueda/Reemplazo    |
+//! | Tab            | Reemplazo    | cambia campo activo (sin evento)|
+//! | Enter          | Reemplazo    | ReemplazarMatch                 |
+//! | Ctrl+H         | Reemplazo    | ReemplazarTodo                  |
+//! | Escape         | Reemplazo    | TerminarBusqueda                |
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use winit::{
     dpi::PhysicalSize,
-    event::{ElementState, Event, WindowEvent},
+    event::{ElementState, Event, MouseButton, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::WindowBuilder,
@@ -62,9 +59,15 @@ use crate::{
 enum ModoRenderer {
     Normal,
     Busqueda,
+    Reemplazo,
 }
 
-/// Renderer principal — encapsula config + contenido inicial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CampoReemplazo {
+    Buscar,
+    Reemplazar,
+}
+
 pub struct Renderer {
     config: ConfigRenderer,
     contenido: ContenidoRender,
@@ -75,7 +78,6 @@ impl Renderer {
         Self { config, contenido }
     }
 
-    /// Inicia el event loop. Bloquea hasta que el usuario cierra la ventana.
     pub fn ejecutar<F>(self, mut manejador: F) -> Result<()>
     where
         F: FnMut(EventoEditor) -> Option<ContenidoRender> + 'static,
@@ -83,7 +85,6 @@ impl Renderer {
         let Self { config, contenido } = self;
 
         let event_loop = EventLoop::new()?;
-
         let window = Arc::new(
             WindowBuilder::new()
                 .with_title(&config.titulo)
@@ -102,15 +103,20 @@ impl Renderer {
 
         tracing::info!(
             "Glyph iniciado — {}×{} | {}pt",
-            config.ancho,
-            config.alto,
-            config.tamano_fuente
+            config.ancho, config.alto, config.tamano_fuente
         );
 
         let mut mods = ModifiersState::default();
         let mut contenido = contenido;
         let mut modo = ModoRenderer::Normal;
         let mut consulta = String::new();
+        let mut reemplazo = String::new();
+        let mut campo = CampoReemplazo::Buscar;
+        let mut pos_raton = (0.0f32, 0.0f32);
+
+        // Constantes de geometría para conversión click → (línea, col)
+        let char_ancho = config.tamano_fuente * 0.601;
+        let linea_alto = config.tamano_fuente * config.multiplicador_linea;
 
         window.request_redraw();
 
@@ -124,37 +130,84 @@ impl Renderer {
                             tracing::info!("Ventana cerrada — saliendo");
                             elwt.exit();
                         }
-
-                        WindowEvent::Resized(nuevo_tamaño) => {
-                            gpu.redimensionar(nuevo_tamaño.width, nuevo_tamaño.height);
+                        WindowEvent::Resized(t) => {
+                            gpu.redimensionar(t.width, t.height);
                             window.request_redraw();
                         }
-
                         WindowEvent::ScaleFactorChanged { .. } => {
-                            let tamaño = window.inner_size();
-                            gpu.redimensionar(tamaño.width, tamaño.height);
+                            let t = window.inner_size();
+                            gpu.redimensionar(t.width, t.height);
                             window.request_redraw();
                         }
-
-                        WindowEvent::ModifiersChanged(nuevos_mods) => {
-                            mods = nuevos_mods.state();
+                        WindowEvent::ModifiersChanged(m) => {
+                            mods = m.state();
                         }
 
+                        // ── Posición del ratón ────────────────────────────
+                        WindowEvent::CursorMoved { position, .. } => {
+                            pos_raton = (position.x as f32, position.y as f32);
+                        }
+
+                        // ── Click izquierdo → mover cursor ────────────────
+                        WindowEvent::MouseInput {
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                            ..
+                        } if modo == ModoRenderer::Normal => {
+                            let gutter = texto.ancho_gutter();
+                            let scroll = texto.scroll_linea();
+                            let tx = pos_raton.0 - gutter - 4.0;
+                            let ty = pos_raton.1 - 8.0;
+                            if tx >= 0.0 && ty >= 0.0 {
+                                let linea = (ty / linea_alto) as i32 + scroll;
+                                let col = (tx / char_ancho) as u32;
+                                let ev = EventoEditor::MoverCursorA {
+                                    linea: linea.max(0) as u32,
+                                    columna: col,
+                                };
+                                if let Some(nuevo) = manejador(ev) {
+                                    contenido = nuevo;
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+
+                        // ── Teclado ──────────────────────────────────────
                         WindowEvent::KeyboardInput { event: ev, .. }
                             if ev.state == ElementState::Pressed =>
                         {
                             let key = &ev.logical_key;
                             let text = ev.text.as_deref();
 
-                            let evento_opt = if modo == ModoRenderer::Busqueda {
-                                procesar_tecla_busqueda(key, text, mods, &mut modo, &mut consulta)
-                            } else {
-                                let opt = resolver_evento(key, text, mods);
-                                if matches!(opt, Some(EventoEditor::IniciarBusqueda)) {
-                                    modo = ModoRenderer::Busqueda;
-                                    consulta.clear();
+                            let evento_opt = match modo {
+                                ModoRenderer::Busqueda => {
+                                    procesar_tecla_busqueda(
+                                        key, text, mods, &mut modo, &mut consulta,
+                                    )
                                 }
-                                opt
+                                ModoRenderer::Reemplazo => {
+                                    procesar_tecla_reemplazo(
+                                        key, text, mods,
+                                        &mut modo, &mut consulta, &mut reemplazo, &mut campo,
+                                    )
+                                }
+                                ModoRenderer::Normal => {
+                                    let opt = resolver_evento(key, text, mods);
+                                    match &opt {
+                                        Some(EventoEditor::IniciarBusqueda) => {
+                                            modo = ModoRenderer::Busqueda;
+                                            consulta.clear();
+                                        }
+                                        Some(EventoEditor::IniciarReemplazo) => {
+                                            modo = ModoRenderer::Reemplazo;
+                                            consulta.clear();
+                                            reemplazo.clear();
+                                            campo = CampoReemplazo::Buscar;
+                                        }
+                                        _ => {}
+                                    }
+                                    opt
+                                }
                             };
 
                             if let Some(evento) = evento_opt {
@@ -172,7 +225,6 @@ impl Renderer {
                         _ => {}
                     }
                 }
-
                 _ => {}
             }
         })?;
@@ -217,14 +269,71 @@ fn procesar_tecla_busqueda(
 }
 
 // ------------------------------------------------------------------
-// Traducción de teclas → EventoEditor (modo Normal)
+// Procesado de teclas en modo reemplazo
 // ------------------------------------------------------------------
 
-fn resolver_evento(
+fn procesar_tecla_reemplazo(
     key: &Key,
     text: Option<&str>,
     mods: ModifiersState,
+    modo: &mut ModoRenderer,
+    consulta: &mut String,
+    reemplazo: &mut String,
+    campo: &mut CampoReemplazo,
 ) -> Option<EventoEditor> {
+    if mods.control_key() {
+        // Ctrl+H — reemplazar todo
+        if let Key::Character(c) = key {
+            if c.as_str() == "h" || c.as_str() == "H" {
+                return Some(EventoEditor::ReemplazarTodo);
+            }
+        }
+        return None;
+    }
+
+    match key {
+        Key::Named(NamedKey::Escape) => {
+            *modo = ModoRenderer::Normal;
+            consulta.clear();
+            reemplazo.clear();
+            Some(EventoEditor::TerminarBusqueda)
+        }
+        Key::Named(NamedKey::Tab) => {
+            *campo = match campo {
+                CampoReemplazo::Buscar => CampoReemplazo::Reemplazar,
+                CampoReemplazo::Reemplazar => CampoReemplazo::Buscar,
+            };
+            None
+        }
+        Key::Named(NamedKey::Enter) => Some(EventoEditor::ReemplazarMatch),
+        Key::Named(NamedKey::Backspace) => match campo {
+            CampoReemplazo::Buscar => {
+                consulta.pop();
+                Some(EventoEditor::ActualizarBusqueda(consulta.clone()))
+            }
+            CampoReemplazo::Reemplazar => {
+                reemplazo.pop();
+                Some(EventoEditor::ActualizarReemplazo(reemplazo.clone()))
+            }
+        },
+        _ => text.filter(|t| !t.is_empty()).map(|t| match campo {
+            CampoReemplazo::Buscar => {
+                consulta.push_str(t);
+                EventoEditor::ActualizarBusqueda(consulta.clone())
+            }
+            CampoReemplazo::Reemplazar => {
+                reemplazo.push_str(t);
+                EventoEditor::ActualizarReemplazo(reemplazo.clone())
+            }
+        }),
+    }
+}
+
+// ------------------------------------------------------------------
+// Traducción de teclas → EventoEditor (modo Normal)
+// ------------------------------------------------------------------
+
+fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState) -> Option<EventoEditor> {
     if mods.control_key() {
         return match key {
             Key::Character(c) => match c.as_str() {
@@ -232,6 +341,7 @@ fn resolver_evento(
                 "z" | "Z" => Some(EventoEditor::Deshacer),
                 "y" | "Y" => Some(EventoEditor::Rehacer),
                 "f" | "F" => Some(EventoEditor::IniciarBusqueda),
+                "h" | "H" => Some(EventoEditor::IniciarReemplazo),
                 _ => None,
             },
             Key::Named(NamedKey::Home) => {
@@ -320,12 +430,9 @@ fn renderizar_frame(
     let vista = frame
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
-
-    let mut encoder =
-        gpu.dispositivo
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("encoder_principal"),
-            });
+    let mut encoder = gpu.dispositivo.create_command_encoder(
+        &wgpu::CommandEncoderDescriptor { label: Some("encoder_principal") },
+    );
 
     {
         let mut pase = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -335,10 +442,7 @@ fn renderizar_frame(
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.118,
-                        g: 0.118,
-                        b: 0.141,
-                        a: 1.0,
+                        r: 0.118, g: 0.118, b: 0.141, a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
                 },

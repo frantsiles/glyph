@@ -296,6 +296,9 @@ impl RendererTexto {
             .map_err(|e| anyhow!("glyphon prepare falló: {e:?}"))
     }
 
+    pub fn ancho_gutter(&self) -> f32 { self.ancho_gutter }
+    pub fn scroll_linea(&self) -> i32 { self.scroll_linea }
+
     /// Emite draw calls de texto dentro de un render pass activo.
     pub fn renderizar_en_pase<'pass>(
         &'pass self,

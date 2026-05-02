@@ -137,6 +137,11 @@ impl Buffer {
         (linea, char_idx - inicio_linea)
     }
 
+    /// Convierte un byte offset a un índice de carácter (para reemplazos en el Rope).
+    pub fn byte_a_char_idx(&self, byte: usize) -> usize {
+        self.rope.byte_to_char(byte.min(self.rope.len_bytes()))
+    }
+
     /// Extrae un rango de texto como String
     pub fn rango_texto(&self, inicio: usize, fin: usize) -> String {
         self.rope.slice(inicio..fin).to_string()
