@@ -75,8 +75,8 @@ Toda la lógica de presentación. No importa ningún tipo de `glyph-core`.
 - **`ContenidoRender`** — DTO (*Data Transfer Object*) que `glyph-app` construye a partir del `Document` y pasa al renderer. Contiene líneas de texto, posición del cursor, `Vec<SpanTexto>` (spans con `ColorRender` ya resuelto), `Vec<DiagnosticoRender>`, `matches_busqueda: Vec<(usize, usize)>`, `match_activo: Option<usize>` y `barra_estado: String`.
 - **`ContextoGpu`** — inicializa `wgpu` (instancia, adaptador, dispositivo, superficie). La ventana vive en un `Arc<Window>` para que `Surface<'static>` sea válida.
 - **`RendererTexto`** — convierte `ContenidoRender` en llamadas a `glyphon`. Gestiona tres buffers: gutter de números de línea (alineado al scroll del editor), editor principal y barra de estado. La línea activa del cursor se resalta en el gutter. Usa un algoritmo de **barrido de fronteras** para asignar colores por prioridad: `COLOR_TEXTO` < sintaxis < match inactivo < match activo < diagnóstico < cursor.
-- **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Gestiona dos modos internos (`Normal` y `Busqueda`) para enrutar las teclas correctamente: en modo búsqueda los caracteres actualizan la consulta en lugar de insertarse en el documento. Emite `EventoEditor` al manejador de la app.
-- **`EventoEditor`** — enum que describe la intención del usuario. Variantes de edición: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. Variantes de búsqueda: `IniciarBusqueda`, `ActualizarBusqueda(String)`, `SiguienteMatch`, `MatchAnterior`, `TerminarBusqueda`.
+- **`Renderer`** — event loop de `winit` + render pass de `wgpu`. Gestiona tres modos internos (`Normal`, `Busqueda`, `Reemplazo`) para enrutar teclas correctamente. En modo reemplazo, `Tab` alterna entre el campo de búsqueda y el campo de sustitución; `Enter` reemplaza el match activo; `Ctrl+H` reemplaza todos. Los clicks de ratón en modo Normal convierten coordenadas de píxel a `MoverCursorA { linea, columna }`. `Ctrl+K` emite `PedirHover` para solicitar información LSP. Emite `EventoEditor` al manejador de la app.
+- **`EventoEditor`** — enum que describe la intención del usuario. Edición: `InsertarTexto`, `BorrarAtras/Adelante`, `MoverCursor(Direccion)`, `Deshacer`, `Rehacer`, `Guardar`. Búsqueda: `IniciarBusqueda`, `ActualizarBusqueda`, `SiguienteMatch`, `MatchAnterior`, `TerminarBusqueda`. Reemplazo: `IniciarReemplazo`, `ActualizarReemplazo`, `ReemplazarMatch`, `ReemplazarTodo`. Ratón: `MoverCursorA { linea, columna }`. LSP: `PedirHover`.
 
 ### glyph-lsp
 
@@ -190,6 +190,8 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 | `Ctrl+Z` | Deshacer |
 | `Ctrl+Y` | Rehacer |
 | `Ctrl+F` | Activar búsqueda |
+| `Ctrl+H` | Activar búsqueda y reemplazo |
+| `Ctrl+K` | Mostrar hover LSP (tipo, doc) en la posición del cursor |
 | `Tab` | Insertar 4 espacios |
 | `Flechas` | Mover cursor |
 | `Inicio` / `Fin` | Inicio / fin de línea |
@@ -197,6 +199,7 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 | `Ctrl+Inicio` / `Ctrl+Fin` | Inicio / fin del documento |
 | `Supr` | Borrar carácter adelante |
 | `Backspace` | Borrar carácter atrás |
+| Click izquierdo | Mover cursor a la posición del puntero |
 
 **Búsqueda (Ctrl+F):**
 
@@ -207,6 +210,18 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 | `Shift+Enter` | Resultado anterior |
 | `Backspace` | Borrar último carácter de la consulta |
 | `Escape` | Salir de búsqueda |
+
+**Búsqueda y reemplazo (Ctrl+H):**
+
+| Tecla | Acción |
+|---|---|
+| Caracteres | Actualizar campo activo |
+| `Tab` | Alternar entre campo de búsqueda y campo de reemplazo |
+| `Enter` | Reemplazar match activo y avanzar al siguiente |
+| `Ctrl+H` | Reemplazar todas las ocurrencias |
+| `Shift+Enter` | Match anterior |
+| `Backspace` | Borrar último carácter del campo activo |
+| `Escape` | Salir del modo reemplazo |
 
 ---
 
@@ -226,7 +241,7 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Cliente LSP asíncrono (`rust-analyzer`)
 - [x] `didOpen` / `didChange` enviados en cada edición
 - [x] Diagnósticos recibidos y registrados en log
-- [ ] Búsqueda y reemplazo en buffer
+- [x] Búsqueda en buffer (Ctrl+F) con navegación entre resultados
 
 ### Milestone 3 — Plugin System ✅ (parcial)
 - [x] Trait `Plugin` y `AccionPlugin` en `glyph-plugin-api`
@@ -235,15 +250,17 @@ RUST_LOG=info cargo run -p glyph -- archivo.rs
 - [x] Diagnósticos LSP inline en el renderer (color overlay por severidad)
 - [x] Conversión UTF-16 → byte para posiciones LSP
 - [x] Búsqueda en buffer (Ctrl+F) con navegación entre resultados
-- [x] Barra de estado: nombre de archivo, posición del cursor, errores LSP y estado de búsqueda
+- [x] Búsqueda y reemplazo (Ctrl+H): reemplazar match activo o todas las ocurrencias
+- [x] Click de ratón para posicionar el cursor en cualquier línea y columna
+- [x] Barra de estado: nombre de archivo, posición del cursor, errores LSP y estado de búsqueda/reemplazo
 - [x] Scroll automático: el editor sigue al cursor con 3 líneas de contexto
 - [x] Navegación extendida: Page Up/Down, Ctrl+Home/End
 - [x] Números de línea (gutter) con resaltado de línea activa
 - [x] Syntax highlighting para JavaScript (`.js`, `.mjs`) y Python (`.py`)
+- [x] Popup de hover LSP (Ctrl+K) — texto flotante sobre el cursor con tipo y documentación
 - [ ] Sistema de permisos declarativo por plugin
 - [ ] Plugin host WASM con `wasmtime`
 - [ ] WIT API v1 — contratos para plugins compilados
-- [ ] Popup de hover en el renderer
 
 ### Milestone 4 — Plugin System avanzado + IA
 - [ ] Plugin host WASM con `wasmtime` (sandboxed, cualquier lenguaje)

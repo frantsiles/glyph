@@ -44,12 +44,15 @@ const COLOR_MATCH_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);
 const COLOR_TEXTO_BARRA: Color = Color::rgb(0x98, 0xA0, 0xAD);
 const COLOR_GUTTER: Color = Color::rgb(0x4B, 0x52, 0x63);
 const COLOR_GUTTER_ACTIVO: Color = Color::rgb(0xAB, 0xB2, 0xBF);
+const COLOR_HOVER: Color = Color::rgb(0xE5, 0xC0, 0x7B); // amarillo dorado One Dark
 
 const ALTURA_BARRA: f32 = 22.0;
 const MARGEN_SCROLL: i32 = 3;
 // Fracción del tamaño de fuente que ocupa un carácter monoespaciado en anchura
 const RATIO_CHAR: f32 = 0.601;
 const PADDING_GUTTER: f32 = 10.0; // padding izquierdo + derecho del gutter
+const POPUP_ANCHO: f32 = 520.0;
+const POPUP_LINEAS: usize = 3;
 
 fn color_diagnostico(severidad: SeveridadRender) -> Color {
     match severidad {
@@ -60,7 +63,7 @@ fn color_diagnostico(severidad: SeveridadRender) -> Color {
     }
 }
 
-/// Encapsula el pipeline de renderizado de texto (gutter + editor + barra de estado).
+/// Encapsula el pipeline de renderizado de texto (gutter + editor + barra de estado + hover).
 pub struct RendererTexto {
     sistema_fuentes: FontSystem,
     cache_formas: SwashCache,
@@ -69,10 +72,15 @@ pub struct RendererTexto {
     buffer: Buffer,
     buffer_barra: Buffer,
     buffer_gutter: Buffer,
+    buffer_hover: Buffer,
     metricas: Metrics,
     metricas_barra: Metrics,
     scroll_linea: i32,
     ancho_gutter: f32,
+    /// true cuando hay hover activo que debe dibujarse
+    hover_activo: bool,
+    /// posición en píxeles donde anclar el popup (esquina superior-izquierda)
+    hover_pos_px: (f32, f32),
 }
 
 impl RendererTexto {
@@ -105,6 +113,10 @@ impl RendererTexto {
         let mut buffer_gutter = Buffer::new(&mut sistema_fuentes, metricas);
         buffer_gutter.set_size(&mut sistema_fuentes, 48.0, 720.0);
 
+        // El popup de hover usa las mismas métricas que el editor
+        let mut buffer_hover = Buffer::new(&mut sistema_fuentes, metricas);
+        buffer_hover.set_size(&mut sistema_fuentes, POPUP_ANCHO, metricas.line_height * POPUP_LINEAS as f32 + 4.0);
+
         Self {
             sistema_fuentes,
             cache_formas,
@@ -113,10 +125,13 @@ impl RendererTexto {
             buffer,
             buffer_barra,
             buffer_gutter,
+            buffer_hover,
             metricas,
             metricas_barra,
             scroll_linea: 0,
             ancho_gutter: 48.0,
+            hover_activo: false,
+            hover_pos_px: (0.0, 0.0),
         }
     }
 
@@ -161,10 +176,13 @@ impl RendererTexto {
             buffer,
             buffer_barra,
             buffer_gutter,
+            buffer_hover,
             metricas,
             metricas_barra,
             scroll_linea,
             ancho_gutter,
+            hover_activo,
+            hover_pos_px,
             ..
         } = self;
 
@@ -213,6 +231,44 @@ impl RendererTexto {
             Shaping::Advanced,
         );
         buffer_barra.shape_until_scroll(sistema_fuentes);
+
+        // — Popup de hover ─────────────────────────────────────────────────
+        *hover_activo = contenido.hover_texto.is_some();
+        if let Some(ref texto_hover) = contenido.hover_texto {
+            // Truncar a POPUP_LINEAS líneas, máx 90 chars cada una
+            let truncado: String = texto_hover
+                .lines()
+                .take(POPUP_LINEAS)
+                .map(|l| if l.chars().count() > 90 { l.chars().take(90).collect() } else { l.to_string() })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let popup_alto = metricas.line_height * POPUP_LINEAS as f32 + 4.0;
+            buffer_hover.set_metrics(sistema_fuentes, *metricas);
+            buffer_hover.set_size(sistema_fuentes, POPUP_ANCHO, popup_alto);
+
+            let hover_attrs = Attrs::new().family(Family::Monospace).color(COLOR_HOVER);
+            buffer_hover.set_rich_text(
+                sistema_fuentes,
+                std::iter::once((truncado.as_str(), hover_attrs)),
+                Shaping::Advanced,
+            );
+            buffer_hover.shape_until_scroll(sistema_fuentes);
+
+            // Calcular posición en píxeles: encima del cursor, o debajo si está arriba
+            if let Some(cursor) = contenido.cursor {
+                let char_ancho_local = metricas.font_size * RATIO_CHAR;
+                let linea_visible = cursor.linea as i32 - *scroll_linea;
+                let cx = *ancho_gutter + (cursor.columna as f32 * char_ancho_local) + 4.0;
+                let cy = linea_visible as f32 * metricas.line_height + 8.0;
+                let py = if linea_visible <= 2 {
+                    cy + metricas.line_height + 4.0
+                } else {
+                    cy - popup_alto - 4.0
+                };
+                *hover_pos_px = (cx.max(*ancho_gutter + 4.0), py.max(8.0));
+            }
+        }
     }
 
     /// Prepara el atlas de glifos para el frame actual (antes del render pass).
@@ -236,9 +292,78 @@ impl RendererTexto {
             buffer,
             buffer_barra,
             buffer_gutter,
+            buffer_hover,
             cache_formas,
+            hover_activo,
+            hover_pos_px,
+            metricas,
             ..
         } = self;
+
+        let mut areas: Vec<TextArea> = vec![
+            // 1. Gutter de números de línea
+            TextArea {
+                buffer: buffer_gutter,
+                left: 4.0,
+                top: 8.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: gutter_ancho_i,
+                    bottom: alto_editor,
+                },
+                default_color: COLOR_GUTTER,
+            },
+            // 2. Editor de texto
+            TextArea {
+                buffer,
+                left: texto_left + 4.0,
+                top: 8.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: gutter_ancho_i,
+                    top: 0,
+                    right: ancho as i32,
+                    bottom: alto_editor,
+                },
+                default_color: COLOR_TEXTO,
+            },
+            // 3. Barra de estado
+            TextArea {
+                buffer: buffer_barra,
+                left: 8.0,
+                top: alto as f32 - ALTURA_BARRA,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: alto_editor,
+                    right: ancho as i32,
+                    bottom: alto as i32,
+                },
+                default_color: COLOR_TEXTO_BARRA,
+            },
+        ];
+
+        // 4. Popup de hover (sólo cuando hay hover activo)
+        if *hover_activo {
+            let (hx, hy) = *hover_pos_px;
+            let hx = hx.min(ancho as f32 - POPUP_ANCHO).max(gutter_ancho_i as f32);
+            let popup_alto = (metricas.line_height * POPUP_LINEAS as f32 + 4.0) as i32;
+            areas.push(TextArea {
+                buffer: buffer_hover,
+                left: hx,
+                top: hy,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: hx as i32,
+                    top: hy as i32,
+                    right: (hx as i32 + POPUP_ANCHO as i32).min(ancho as i32),
+                    bottom: (hy as i32 + popup_alto).min(alto_editor),
+                },
+                default_color: COLOR_HOVER,
+            });
+        }
 
         renderer
             .prepare(
@@ -247,50 +372,7 @@ impl RendererTexto {
                 sistema_fuentes,
                 atlas,
                 Resolution { width: ancho, height: alto },
-                [
-                    // 1. Gutter de números de línea
-                    TextArea {
-                        buffer: buffer_gutter,
-                        left: 4.0,
-                        top: 8.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: 0,
-                            right: gutter_ancho_i,
-                            bottom: alto_editor,
-                        },
-                        default_color: COLOR_GUTTER,
-                    },
-                    // 2. Editor de texto
-                    TextArea {
-                        buffer,
-                        left: texto_left + 4.0,
-                        top: 8.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: gutter_ancho_i,
-                            top: 0,
-                            right: ancho as i32,
-                            bottom: alto_editor,
-                        },
-                        default_color: COLOR_TEXTO,
-                    },
-                    // 3. Barra de estado
-                    TextArea {
-                        buffer: buffer_barra,
-                        left: 8.0,
-                        top: alto as f32 - ALTURA_BARRA,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: alto_editor,
-                            right: ancho as i32,
-                            bottom: alto as i32,
-                        },
-                        default_color: COLOR_TEXTO_BARRA,
-                    },
-                ],
+                areas,
                 cache_formas,
             )
             .map_err(|e| anyhow!("glyphon prepare falló: {e:?}"))

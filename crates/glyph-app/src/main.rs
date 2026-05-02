@@ -15,13 +15,15 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::time::Duration;
 
 use anyhow::Result;
 use glyph_core::{
     resaltado::{Lenguaje, Resaltador, TipoResaltado},
     Document,
 };
-use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Url};
+use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Position, Url};
 use glyph_plugin_host::HostPlugins;
 use glyph_renderer::{
     ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DiagnosticoRender,
@@ -73,6 +75,8 @@ fn main() -> Result<()> {
     let diag_escritor = Arc::clone(&diagnosticos_compartidos);
 
     let (tx_lsp, rx_lsp) = tokio_mpsc::unbounded_channel::<(Url, String, i32)>();
+    let (tx_hover_req, rx_hover_req) =
+        tokio_mpsc::unbounded_channel::<(Url, Position, std_mpsc::SyncSender<Option<String>>)>();
 
     if let Some(ref ruta) = ruta_archivo {
         let ruta_lsp = ruta.canonicalize().unwrap_or_else(|_| ruta.clone());
@@ -85,7 +89,7 @@ fn main() -> Result<()> {
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("runtime tokio para LSP");
-            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp, diag_escritor));
+            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp, rx_hover_req, diag_escritor));
         });
     }
 
@@ -117,6 +121,7 @@ fn main() -> Result<()> {
         vec![],
         None,
         barra_inicial,
+        None,
     );
 
     let titulo = nombre_archivo
@@ -147,6 +152,9 @@ fn main() -> Result<()> {
     let mut matches_actuales: Vec<(usize, usize)> = Vec::new();
     let mut match_activo: usize = 0;
 
+    // ── Estado de hover (vive en el closure del event loop) ────────────
+    let mut hover_actual: Option<String> = None;
+
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
         let modifica_texto = matches!(
             evento,
@@ -158,6 +166,16 @@ fn main() -> Result<()> {
                 | EventoEditor::ReemplazarMatch
                 | EventoEditor::ReemplazarTodo
         );
+
+        // Cualquier acción que mueve el cursor o modifica el texto descarta el hover
+        let descarta_hover = modifica_texto
+            || matches!(
+                evento,
+                EventoEditor::MoverCursor(_) | EventoEditor::MoverCursorA { .. }
+            );
+        if descarta_hover {
+            hover_actual = None;
+        }
 
         match evento {
             EventoEditor::InsertarTexto(texto) => {
@@ -321,6 +339,26 @@ fn main() -> Result<()> {
             EventoEditor::MoverCursorA { linea, columna } => {
                 documento.mover_cursor_a(linea as usize, columna as usize);
             }
+
+            // ── Hover LSP (Ctrl+K) ────────────────────────────────────
+            EventoEditor::PedirHover => {
+                if let Some(ref uri) = uri_doc {
+                    let pos = documento.cursor_principal().posicion;
+                    let position = Position {
+                        line: pos.linea as u32,
+                        character: pos.columna as u32,
+                    };
+                    let (tx_resp, rx_resp) = std_mpsc::sync_channel::<Option<String>>(1);
+                    if tx_hover_req.send((uri.clone(), position, tx_resp)).is_ok() {
+                        hover_actual = rx_resp
+                            .recv_timeout(Duration::from_millis(350))
+                            .ok()
+                            .flatten();
+                    } else {
+                        tracing::debug!("LSP no disponible para hover");
+                    }
+                }
+            }
         }
 
         // Notificar cambio al LSP y al plugin host
@@ -368,6 +406,7 @@ fn main() -> Result<()> {
             m_busqueda,
             m_activo,
             barra,
+            hover_actual.clone(),
         ))
     })
 }
@@ -381,6 +420,7 @@ async fn hilo_lsp(
     texto_inicial: String,
     raiz: PathBuf,
     mut rx: tokio_mpsc::UnboundedReceiver<(Url, String, i32)>,
+    mut rx_hover: tokio_mpsc::UnboundedReceiver<(Url, Position, std_mpsc::SyncSender<Option<String>>)>,
     diag_escritor: Arc<Mutex<Vec<Diagnostic>>>,
 ) {
     let mut cliente = match ClienteLsp::conectar("rust-analyzer", &[], &raiz).await {
@@ -417,6 +457,14 @@ async fn hilo_lsp(
                     }
                 }
             }
+            req = rx_hover.recv() => {
+                if let Some((uri, posicion, tx_resp)) = req {
+                    let resultado = cliente.hover(uri, posicion).await;
+                    let texto = resultado.ok().flatten();
+                    tracing::debug!("Hover: {:?}", texto.as_deref().map(|s| &s[..s.len().min(60)]));
+                    let _ = tx_resp.send(texto);
+                }
+            }
         }
     }
 }
@@ -448,6 +496,7 @@ fn documento_a_contenido(
     matches_busqueda: Vec<(usize, usize)>,
     match_activo: Option<usize>,
     barra_estado: String,
+    hover_texto: Option<String>,
 ) -> ContenidoRender {
     let cursor = doc.cursor_principal();
     let texto_completo = doc.buffer.contenido_completo();
@@ -504,6 +553,7 @@ fn documento_a_contenido(
         matches_busqueda,
         match_activo,
         barra_estado,
+        hover_texto,
     }
 }
 

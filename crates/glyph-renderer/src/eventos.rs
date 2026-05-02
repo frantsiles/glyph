@@ -77,4 +77,7 @@ pub enum EventoEditor {
 
     /// Click del ratón — mover cursor a (línea, columna) en coordenadas de carácter
     MoverCursorA { linea: u32, columna: u32 },
+
+    /// Pedir información de hover LSP en la posición del cursor (Ctrl+K)
+    PedirHover,
 }

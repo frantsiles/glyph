@@ -89,6 +89,9 @@ pub struct ContenidoRender {
 
     /// Texto a mostrar en la barra de estado inferior
     pub barra_estado: String,
+
+    /// Texto de hover LSP — Some muestra el popup flotante, None lo oculta
+    pub hover_texto: Option<String>,
 }
 
 impl ContenidoRender {
@@ -103,6 +106,7 @@ impl ContenidoRender {
             matches_busqueda: Vec::new(),
             match_activo: None,
             barra_estado: String::new(),
+            hover_texto: None,
         }
     }
 

@@ -342,6 +342,7 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState) -> Optio
                 "y" | "Y" => Some(EventoEditor::Rehacer),
                 "f" | "F" => Some(EventoEditor::IniciarBusqueda),
                 "h" | "H" => Some(EventoEditor::IniciarReemplazo),
+                "k" | "K" => Some(EventoEditor::PedirHover),
                 _ => None,
             },
             Key::Named(NamedKey::Home) => {
