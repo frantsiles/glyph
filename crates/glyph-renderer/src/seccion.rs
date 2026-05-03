@@ -41,6 +41,7 @@ pub struct SeccionUI {
     pub visible: bool,
     pub z_order: i32,
     pub color_fondo: Option<ColorRgba>,
+    pub con_foco: bool,
 }
 
 #[derive(Debug, Clone)]

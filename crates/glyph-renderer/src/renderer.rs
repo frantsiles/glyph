@@ -125,25 +125,30 @@ impl Renderer {
             id: "tabs".into(), lado: LadoLayout::Arriba,
             tamano_pref: TamanoPref::Fijo(ALTURA_TABS_PX),
             visible: true, z_order: 0, color_fondo: Some(COLOR_TABS_FONDO),
+            con_foco: false,
         });
         layout.registrar(SeccionUI {
             id: "statusbar".into(), lado: LadoLayout::Abajo,
             tamano_pref: TamanoPref::Fijo(ALTURA_STATUS_PX),
             visible: true, z_order: 1, color_fondo: Some(COLOR_STATUS_FONDO),
+            con_foco: false,
         });
         layout.registrar(SeccionUI {
             id: "sidebar".into(), lado: LadoLayout::Izquierda,
             tamano_pref: TamanoPref::Fijo(ANCHO_SIDEBAR_PX),
             visible: false, z_order: 10, color_fondo: Some(COLOR_SIDEBAR_FONDO),
+            con_foco: false,
         });
         layout.registrar(SeccionUI {
             id: "editor_area".into(), lado: LadoLayout::Centro,
             tamano_pref: TamanoPref::Flex(1.0),
             visible: true, z_order: 2, color_fondo: None,
+            con_foco: true,
         });
 
         let tamano_tab = config.tamano_tab;
         let linea_alto = config.tamano_fuente * config.multiplicador_linea;
+        let mostrar_borde_foco = config.mostrar_borde_foco;
 
         tracing::info!(
             "Glyph iniciado — {}×{} | {}pt",
@@ -159,6 +164,7 @@ impl Renderer {
         let mut pos_raton = (0.0f32, 0.0f32);
         let mut sidebar_resizing = false;
         let mut sidebar_ancho = ANCHO_SIDEBAR_PX;
+        let mut seccion_con_foco = "editor_area".to_string();
 
         window.request_redraw();
 
@@ -201,6 +207,7 @@ impl Renderer {
                                             visible: sec.visible,
                                             z_order: sec.z_order,
                                             color_fondo: sec.color_fondo,
+                                            con_foco: sec.con_foco,
                                         });
                                     }
                                     window.request_redraw();
@@ -282,6 +289,33 @@ impl Renderer {
 
                             if !atajo_redimension {
                                 if let Some(id) = layout.seccion_en_posicion(mx, my).cloned() {
+                                    // Cambiar foco si se clickeó una sección diferente
+                                    if id != seccion_con_foco {
+                                        // Quitar foco de la sección anterior
+                                        if let Some(sec) = layout.secciones().iter().find(|s| s.id == seccion_con_foco).cloned() {
+                                            layout.registrar(SeccionUI {
+                                                con_foco: false,
+                                                ..sec
+                                            });
+                                        }
+                                        
+                                        // Establecer foco en la nueva sección
+                                        if let Some(sec) = layout.secciones().iter().find(|s| s.id == id).cloned() {
+                                            layout.registrar(SeccionUI {
+                                                con_foco: true,
+                                                ..sec
+                                            });
+                                        }
+                                        
+                                        seccion_con_foco = id.clone();
+                                        
+                                        // Emitir evento de cambio de foco
+                                        if let Some(nuevo) = manejador(EventoEditor::CambioFoco(id.clone())) {
+                                            contenido = nuevo;
+                                            window.request_redraw();
+                                        }
+                                    }
+                                    
                                     if id == "tabs" {
                                         // Click en la barra de tabs
                                         if let Some(idx) = texto.tab_en_posicion(mx) {
@@ -357,7 +391,7 @@ impl Renderer {
                                     )
                                 }
                                 ModoRenderer::Normal => {
-                                    let opt = resolver_evento(key, text, mods, tamano_tab);
+                                    let opt = resolver_evento(key, text, mods, tamano_tab, &seccion_con_foco);
                                     match &opt {
                                         Some(EventoEditor::IniciarBusqueda) => {
                                             modo = ModoRenderer::Busqueda;
@@ -411,6 +445,7 @@ impl Renderer {
                                 &contenido,
                                 ancho,
                                 alto,
+                                mostrar_borde_foco,
                             );
                         }
 
@@ -463,6 +498,11 @@ fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &Contenid
         } else {
             TamanoPref::Fijo(sec.tamano)
         };
+        // Preservar el estado de foco si la sección ya existe
+        let con_foco = layout.secciones().iter()
+            .find(|s| s.id == sec.id)
+            .map(|s| s.con_foco)
+            .unwrap_or(false);
         layout.registrar(SeccionUI {
             id: sec.id.clone(),
             lado,
@@ -470,6 +510,7 @@ fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &Contenid
             visible: true,
             z_order: 10 + i as i32,
             color_fondo,
+            con_foco,
         });
     }
 }
@@ -573,7 +614,10 @@ fn procesar_tecla_reemplazo(
 // Traducción de teclas → EventoEditor (modo Normal)
 // ------------------------------------------------------------------
 
-fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_tab: usize) -> Option<EventoEditor> {
+fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_tab: usize, seccion_con_foco: &str) -> Option<EventoEditor> {
+    // Las secciones no-editor siempre ignoran edición de texto
+    let es_editor = seccion_con_foco == "editor_area";
+    
     if mods.control_key() {
         return match key {
             Key::Character(c) => match c.as_str() {
@@ -613,62 +657,141 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
 
     match key {
         Key::Named(NamedKey::Enter) => {
-            return Some(EventoEditor::InsertarTexto("\n".to_string()));
+            if es_editor {
+                return Some(EventoEditor::InsertarTexto("\n".to_string()));
+            } else {
+                // En otras secciones, Enter emite evento de sección
+                return Some(EventoEditor::EventoSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    linea: 0, // Será interpretado por la sección
+                });
+            }
         }
         Key::Named(NamedKey::Tab) => {
-            return Some(EventoEditor::InsertarTexto(" ".repeat(tamano_tab)));
-        }
-        Key::Named(NamedKey::Backspace) => return Some(EventoEditor::BorrarAtras),
-        Key::Named(NamedKey::Delete) => return Some(EventoEditor::BorrarAdelante),
-        Key::Named(NamedKey::ArrowLeft) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Izquierda))
+            if es_editor {
+                return Some(EventoEditor::InsertarTexto(" ".repeat(tamano_tab)));
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::Izquierda))
-            };
+                return None; // Tab ignora en secciones no-editor
+            }
+        }
+        Key::Named(NamedKey::Backspace) => {
+            return if es_editor { Some(EventoEditor::BorrarAtras) } else { None };
+        }
+        Key::Named(NamedKey::Delete) => {
+            return if es_editor { Some(EventoEditor::BorrarAdelante) } else { None };
+        }
+        Key::Named(NamedKey::ArrowLeft) => {
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Izquierda))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::Izquierda))
+                };
+            } else {
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::Izquierda,
+                });
+            }
         }
         Key::Named(NamedKey::ArrowRight) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Derecha))
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Derecha))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::Derecha))
+                };
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::Derecha))
-            };
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::Derecha,
+                });
+            }
         }
         Key::Named(NamedKey::ArrowUp) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Arriba))
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Arriba))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::Arriba))
+                };
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::Arriba))
-            };
+                // En sidebar u otras secciones, arriba = subir en la lista
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::Arriba,
+                });
+            }
         }
         Key::Named(NamedKey::ArrowDown) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Abajo))
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Abajo))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::Abajo))
+                };
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::Abajo))
-            };
+                // En sidebar u otras secciones, abajo = bajar en la lista
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::Abajo,
+                });
+            }
         }
         Key::Named(NamedKey::Home) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::InicioLinea))
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::InicioLinea))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::InicioLinea))
+                };
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::InicioLinea))
-            };
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::InicioLinea,
+                });
+            }
         }
         Key::Named(NamedKey::End) => {
-            return if shift {
-                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::FinLinea))
+            if es_editor {
+                return if shift {
+                    Some(EventoEditor::ExtenderSeleccion(DireccionCursor::FinLinea))
+                } else {
+                    Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea))
+                };
             } else {
-                Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea))
-            };
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::FinLinea,
+                });
+            }
         }
         Key::Named(NamedKey::PageUp) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaArriba));
+            if es_editor {
+                return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaArriba));
+            } else {
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::PaginaArriba,
+                });
+            }
         }
         Key::Named(NamedKey::PageDown) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaAbajo));
+            if es_editor {
+                return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaAbajo));
+            } else {
+                return Some(EventoEditor::NavegacionSeccion {
+                    id_seccion: seccion_con_foco.to_string(),
+                    direccion: DireccionCursor::PaginaAbajo,
+                });
+            }
         }
         _ => {}
+    }
+
+    // En secciones no-editor, ignorar entrada de texto
+    if !es_editor {
+        return None;
     }
 
     text.filter(|t| !t.is_empty())
@@ -689,6 +812,7 @@ fn renderizar_frame(
     contenido: &ContenidoRender,
     ancho: u32,
     alto: u32,
+    mostrar_borde_foco: bool,
 ) {
     let af = ancho as f32;
     let hf = alto as f32;
@@ -708,6 +832,48 @@ fn renderizar_frame(
             quads.agregar_quad(sol.rect, c);
         }
     }
+    
+    // Añadir borde visual para la sección con foco (desactivado por defecto)
+    if mostrar_borde_foco {
+        const BORDE_GROSOR: f32 = 2.0;
+        const COLOR_BORDE_FOCO: ColorRgba = ColorRgba { r: 0.8, g: 0.8, b: 1.0, a: 0.8 };
+        if let Some(sec_foco) = layout.secciones().iter().find(|s| s.con_foco).cloned() {
+            if let Some(rect) = layout.rect_seccion(&sec_foco.id) {
+                // Borde superior
+                quads.agregar_quad(RectPx {
+                    x: rect.x,
+                    y: rect.y,
+                    ancho: rect.ancho,
+                    alto: BORDE_GROSOR,
+                }, COLOR_BORDE_FOCO);
+                
+                // Borde inferior
+                quads.agregar_quad(RectPx {
+                    x: rect.x,
+                    y: rect.y + rect.alto - BORDE_GROSOR,
+                    ancho: rect.ancho,
+                    alto: BORDE_GROSOR,
+                }, COLOR_BORDE_FOCO);
+                
+                // Borde izquierdo
+                quads.agregar_quad(RectPx {
+                    x: rect.x,
+                    y: rect.y,
+                    ancho: BORDE_GROSOR,
+                    alto: rect.alto,
+                }, COLOR_BORDE_FOCO);
+                
+                // Borde derecho
+                quads.agregar_quad(RectPx {
+                    x: rect.x + rect.ancho - BORDE_GROSOR,
+                    y: rect.y,
+                    ancho: BORDE_GROSOR,
+                    alto: rect.alto,
+                }, COLOR_BORDE_FOCO);
+            }
+        }
+    }
+    
     if let Some(rect) = layout.rect_seccion("sidebar") {
         if rect.ancho > 40.0 {
             // Divider line at the resizable edge

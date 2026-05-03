@@ -99,6 +99,10 @@ pub enum EventoEditor {
     /// Abrir un nuevo tab vacío (Ctrl+T)
     NuevoTab,
 
+    /// Una sección cambió el foco (por click o navegación)
+    /// El String es el ID de la sección que ahora tiene foco
+    CambioFoco(String),
+
     /// Cerrar el tab activo (Ctrl+W)
     CerrarTab,
 
@@ -115,7 +119,30 @@ pub enum EventoEditor {
 
     /// El usuario hizo click en una sección de plugin.
     /// `linea` es el índice 0-based de la línea clickeada.
+    ///
+    /// **Nota para implementadores de secciones:**
+    /// - La app debe renderizar el item en la línea con estilo "seleccionado" (diferente color/fondo)
+    /// - Si el usuario hace Enter sobre el item seleccionado, emitirá otro EventoSeccion con la misma línea
+    /// - La app puede usar este evento para abrir/activar el item (ej: abrir carpeta, archivo, etc.)
     EventoSeccion { id_seccion: String, linea: u32 },
+
+    /// Navegación en una sección (teclado).
+    /// Emitido cuando se presionan flechas u otras teclas de navegación en una sección que no es editor.
+    ///
+    /// **Ejemplo: Navegación en sidebar de carpetas**
+    /// - Flecha Arriba → cambiar selección a item anterior
+    /// - Flecha Abajo → cambiar selección a item siguiente
+    /// - Flecha Derecha → expandir carpeta si está colapsada, o entrar en subcarpeta
+    /// - Flecha Izquierda → colapsar carpeta si está expandida, o salir a carpeta padre
+    /// - Home/End → ir al primer/último item
+    /// - Page Up/Down → scroll de múltiples items
+    ///
+    /// **La app debe:**
+    /// 1. Rastrear el `current_selected_line` en la sección
+    /// 2. Manejar cada DireccionCursor para actualizar la selección
+    /// 3. Renderizar el item seleccionado con fondo/color diferente
+    /// 4. Renderizar items con hover cuando se pase el ratón (opcional, pero recomendado)
+    NavegacionSeccion { id_seccion: String, direccion: DireccionCursor },
 
     /// Mostrar/ocultar la sidebar (Ctrl+B)
     ToggleSidebar,

@@ -259,6 +259,7 @@ fn main() -> Result<()> {
         multiplicador_linea: cfg.editor.interlineado,
         familia_fuente: cfg_lang.familia_fuente.or(cfg.editor.familia_fuente),
         tamano_tab: cfg_lang.tamano_tab.unwrap_or(4),
+        mostrar_borde_foco: false, // Desactivado por defecto
     };
 
     // ── Estado de hover (vive en el closure del event loop) ────────────

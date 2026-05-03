@@ -26,6 +26,9 @@ pub struct ConfigRenderer {
 
     /// Espacios que inserta la tecla Tab
     pub tamano_tab: usize,
+
+    /// Mostrar borde visual alrededor de la sección con foco (desactivado por defecto)
+    pub mostrar_borde_foco: bool,
 }
 
 impl Default for ConfigRenderer {
@@ -38,6 +41,7 @@ impl Default for ConfigRenderer {
             multiplicador_linea: 1.4,
             familia_fuente: None,
             tamano_tab: 4,
+            mostrar_borde_foco: false,
         }
     }
 }
