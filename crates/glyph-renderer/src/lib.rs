@@ -24,13 +24,15 @@ pub mod contenido;
 pub mod eventos;
 
 mod gpu;
+mod quads;
 mod renderer;
+mod seccion;
 mod texto;
 
 pub use configuracion::ConfigRenderer;
 pub use contenido::{
-    ColorRender, ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto,
-    TabInfo,
+    ColorRender, ContenidoRender, CursorRender, DiagnosticoRender, LineaSeccionRender,
+    SeccionContenidoRender, SeveridadRender, SpanTexto, TabInfo,
 };
 pub use eventos::{DireccionCursor, EventoEditor};
 pub use renderer::Renderer;

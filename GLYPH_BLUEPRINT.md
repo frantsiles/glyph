@@ -216,7 +216,7 @@ Formato de retorno: puntero a [u32-LE len][UTF-8 JSON]
 
 ---
 
-## 4. Estado Actual — 2026-05-02
+## 4. Estado Actual — 2026-05-02 (M5 completado)
 
 ### Tabla de features
 
@@ -241,10 +241,10 @@ Formato de retorno: puntero a [u32-LE len][UTF-8 JSON]
 | Sistema de permisos declarativos | glyph-plugin-api | ✅ Completo |
 | plugin-theme (Lua, Wallbash) | plugin-theme | ✅ Completo |
 | plugin-wasm-monokai (referencia) | plugin-wasm-monokai | ✅ Completo |
-| **QuadRenderer (rects wgpu)** | glyph-renderer | 🔲 Pendiente M5 |
-| **SeccionUI + LayoutManager** | glyph-renderer | 🔲 Pendiente M5 |
-| **API secciones en plugins (Lua/WASM)** | glyph-plugin-api | 🔲 Pendiente M5 |
-| **plugin-sidebar (file explorer)** | plugin-sidebar | 🔲 Pendiente M5 |
+| QuadRenderer (rects wgpu) | glyph-renderer | ✅ Completo M5 |
+| SeccionUI + LayoutManager | glyph-renderer | ✅ Completo M5 |
+| API secciones en plugins (Lua/WASM) | glyph-plugin-api | ✅ Completo M5 |
+| plugin-sidebar (file explorer) | plugin-sidebar | ✅ Completo M5 |
 | plugin-git (gutter + panel) | plugin-git | 🔲 Pendiente M6 |
 | plugin-formatter (rustfmt/prettier) | plugin-formatter | 🔲 Pendiente M6 |
 | Contrato WIT ai-provider | glyph-plugin-api | 🔲 Pendiente M7 |
@@ -288,7 +288,7 @@ Scroll → desplazar vista
 
 ## 5. Plan de Milestones
 
-> M0–M4 completados. Plan desde M5.
+> M0–M5 completados. Plan desde M6.
 
 ---
 

@@ -17,7 +17,9 @@ glyph-core     = { path = "../glyph-core" }
 glyph-renderer = { path = "../glyph-renderer" }
 glyph-lsp          = { path = "../glyph-lsp" }
 glyph-plugin-host  = { path = "../glyph-plugin-host" }
+glyph-plugin-api   = { path = "../glyph-plugin-api" }
 plugin-theme       = { path = "../../plugins/plugin-theme" }
+plugin-sidebar     = { path = "../../plugins/plugin-sidebar" }
 anyhow              = { workspace = true }
 arboard             = { workspace = true }
 tokio               = { workspace = true }

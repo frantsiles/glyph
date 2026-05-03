@@ -1112,8 +1112,10 @@ dependencies = [
  "dirs",
  "glyph-core",
  "glyph-lsp",
+ "glyph-plugin-api",
  "glyph-plugin-host",
  "glyph-renderer",
+ "plugin-sidebar",
  "plugin-theme",
  "serde",
  "tokio",
@@ -2180,6 +2182,10 @@ version = "0.1.0"
 
 [[package]]
 name = "plugin-git"
+version = "0.1.0"
+
+[[package]]
+name = "plugin-sidebar"
 version = "0.1.0"
 
 [[package]]

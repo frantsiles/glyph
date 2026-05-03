@@ -110,4 +110,13 @@ pub enum EventoEditor {
 
     /// Activar un tab concreto por índice (click en la barra de tabs)
     ActivarTab(usize),
+
+    // ── M5: Secciones de plugin ───────────────────────────────────────
+
+    /// El usuario hizo click en una sección de plugin.
+    /// `linea` es el índice 0-based de la línea clickeada.
+    EventoSeccion { id_seccion: String, linea: u32 },
+
+    /// Mostrar/ocultar la sidebar (Ctrl+B)
+    ToggleSidebar,
 }

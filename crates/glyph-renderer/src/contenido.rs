@@ -63,6 +63,29 @@ pub struct CursorRender {
     pub columna: u32,
 }
 
+// ------------------------------------------------------------------
+// Tipos para secciones de plugin (M5)
+// ------------------------------------------------------------------
+
+/// Una línea de texto para renderizar en una sección de plugin.
+#[derive(Debug, Clone)]
+pub struct LineaSeccionRender {
+    pub texto: String,
+    pub color: Option<[u8; 3]>,
+    pub negrita: bool,
+}
+
+/// Contenido de una sección registrada por un plugin, lista para renderizar.
+#[derive(Debug, Clone)]
+pub struct SeccionContenidoRender {
+    pub id: String,
+    /// "izquierda" | "derecha" | "arriba" | "abajo"
+    pub lado: String,
+    pub tamano: f32,
+    pub color_fondo: Option<[u8; 3]>,
+    pub lineas: Vec<LineaSeccionRender>,
+}
+
 /// Información de un tab para renderizar en la barra de tabs
 #[derive(Debug, Clone)]
 pub struct TabInfo {
@@ -109,6 +132,9 @@ pub struct ContenidoRender {
 
     /// Tabs abiertos — el renderer los muestra en la barra superior
     pub tabs: Vec<TabInfo>,
+
+    /// Secciones de plugin con su contenido actualizado (M5+)
+    pub secciones_plugin: Vec<SeccionContenidoRender>,
 }
 
 impl ContenidoRender {
@@ -126,6 +152,7 @@ impl ContenidoRender {
             hover_texto: None,
             seleccion_bytes: None,
             tabs: vec![TabInfo { nombre: "Sin título".into(), activo: true, modificado: false }],
+            secciones_plugin: Vec::new(),
         }
     }
 

@@ -28,10 +28,12 @@ use glyph_core::{
     Document,
 };
 use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Position, Url};
+use glyph_plugin_api;
 use glyph_plugin_host::HostPlugins;
 use glyph_renderer::{
     ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DiagnosticoRender,
-    DireccionCursor, EventoEditor, SeveridadRender, SpanTexto, TabInfo,
+    DireccionCursor, EventoEditor, LineaSeccionRender, SeccionContenidoRender,
+    SeveridadRender, SpanTexto, TabInfo,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -177,10 +179,13 @@ fn main() -> Result<()> {
 
     let mut gestor = GestorTabs::nuevo_con(tab_inicial);
 
-    // ── Plugin host — cargar tema desde Lua ───────────────────────────────
+    // ── Plugin host ───────────────────────────────────────────────────────
     let mut host = HostPlugins::nuevo();
     if let Err(e) = host.cargar_lua(plugin_theme::NOMBRE, plugin_theme::TEMA_SCRIPT) {
         tracing::warn!("No se pudo cargar el tema Lua: {e} — usando tema por defecto");
+    }
+    if let Err(e) = host.cargar_lua(plugin_sidebar::NOMBRE, plugin_sidebar::SCRIPT) {
+        tracing::warn!("No se pudo cargar plugin-sidebar: {e}");
     }
     host.inicializar();
     host.al_abrir(gestor.tab().ruta.as_ref().and_then(|p| p.to_str()));
@@ -596,6 +601,25 @@ fn main() -> Result<()> {
                 }
             }
 
+            // ── Evento de sección de plugin ───────────────────────────
+            EventoEditor::EventoSeccion { id_seccion, linea } => {
+                let acciones = host.evento_seccion(&id_seccion, linea);
+                for accion in acciones {
+                    if let glyph_plugin_api::AccionPlugin::AbrirArchivo(ruta) = accion {
+                        abrir_archivo_en_tab(&mut gestor, &ruta, &host, &diagnosticos_compartidos,
+                            &resaltador, &tx_lsp, &mut hover_actual);
+                    }
+                }
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
+            }
+
+            // ToggleSidebar es manejado por el renderer directamente
+            EventoEditor::ToggleSidebar => {
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
+            }
+
             // Tab events already handled above
             _ => {}
         }
@@ -735,6 +759,54 @@ fn construir_contenido(
     )
 }
 
+/// Abre un archivo en un nuevo tab (o activa el existente si ya está abierto).
+fn abrir_archivo_en_tab(
+    gestor: &mut GestorTabs,
+    ruta_str: &str,
+    _host: &HostPlugins,
+    _diagnosticos: &Arc<Mutex<Vec<Diagnostic>>>,
+    _resaltador: &Resaltador,
+    _tx_lsp: &tokio_mpsc::UnboundedSender<(Url, String, i32)>,
+    hover_actual: &mut Option<String>,
+) {
+    let ruta = std::path::PathBuf::from(ruta_str);
+
+    // Si ya está abierto, activarlo
+    if let Some(idx) = gestor.tabs.iter().position(|t| t.ruta.as_ref() == Some(&ruta)) {
+        gestor.activar(idx);
+        *hover_actual = None;
+        return;
+    }
+
+    // Leer el archivo
+    let contenido_fs = if ruta.exists() {
+        std::fs::read_to_string(&ruta).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let nombre = ruta.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ruta_str.to_string());
+    let uri = ruta.canonicalize().ok()
+        .and_then(|r| Url::from_file_path(r).ok());
+    let lenguaje = glyph_core::resaltado::Lenguaje::desde_extension(
+        ruta.extension().and_then(|e| e.to_str()).unwrap_or(""),
+    );
+    let tab = TabDoc {
+        documento: glyph_core::Document::desde_archivo(&contenido_fs, ruta.clone()),
+        nombre,
+        ruta: Some(ruta),
+        uri,
+        lenguaje,
+        en_busqueda: false, en_reemplazo: false,
+        consulta: String::new(), reemplazo_str: String::new(),
+        matches: Vec::new(), match_activo: 0, modificado: false,
+    };
+    gestor.tabs.push(tab);
+    gestor.activo = gestor.tabs.len() - 1;
+    *hover_actual = None;
+}
+
 fn documento_a_contenido(
     doc: &Document,
     resaltador: &Resaltador,
@@ -790,6 +862,21 @@ fn documento_a_contenido(
         })
         .collect();
 
+    let secciones_plugin: Vec<SeccionContenidoRender> = host.secciones_para_render()
+        .into_iter()
+        .map(|s| SeccionContenidoRender {
+            id: s.id,
+            lado: s.lado,
+            tamano: s.tamano,
+            color_fondo: s.color_fondo,
+            lineas: s.lineas.into_iter().map(|l| LineaSeccionRender {
+                texto: l.texto,
+                color: l.color,
+                negrita: l.negrita,
+            }).collect(),
+        })
+        .collect();
+
     ContenidoRender {
         lineas,
         cursor: Some(CursorRender {
@@ -805,6 +892,7 @@ fn documento_a_contenido(
         hover_texto,
         seleccion_bytes: doc.seleccion_bytes(),
         tabs,
+        secciones_plugin,
     }
 }
 

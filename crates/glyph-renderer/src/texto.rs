@@ -35,7 +35,7 @@ use glyphon::{
     TextAtlas, TextBounds, TextRenderer,
 };
 
-use crate::contenido::{ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto};
+use crate::contenido::{ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto, LineaSeccionRender};
 
 
 // Wallbash — paleta derivada del tema wallbash
@@ -96,6 +96,12 @@ pub struct RendererTexto {
     metricas_tabs: Metrics,
     /// Límites X de cada tab (inicio, fin) para detección de clicks
     tabs_limites: Vec<(f32, f32)>,
+    /// Buffer de texto para la sidebar (sección de plugin)
+    buffer_sidebar: Buffer,
+    /// Ancho actual de la sidebar (0.0 si no visible)
+    sidebar_ancho: f32,
+    /// Contenido actual de la sidebar
+    sidebar_lineas: Vec<LineaSeccionRender>,
 }
 
 impl RendererTexto {
@@ -141,6 +147,9 @@ impl RendererTexto {
         let mut buffer_hover = Buffer::new(&mut sistema_fuentes, metricas);
         buffer_hover.set_size(&mut sistema_fuentes, POPUP_ANCHO, metricas.line_height * POPUP_LINEAS as f32 + 4.0);
 
+        let mut buffer_sidebar = Buffer::new(&mut sistema_fuentes, metricas);
+        buffer_sidebar.set_size(&mut sistema_fuentes, 240.0, 720.0);
+
         Self {
             sistema_fuentes,
             cache_formas,
@@ -160,6 +169,9 @@ impl RendererTexto {
             buffer_tabs,
             metricas_tabs,
             tabs_limites: Vec::new(),
+            buffer_sidebar,
+            sidebar_ancho: 0.0,
+            sidebar_lineas: Vec::new(),
         }
     }
 
@@ -178,7 +190,16 @@ impl RendererTexto {
     }
 
     /// Actualiza los buffers de texto con el contenido del frame.
-    pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
+    /// `sidebar_ancho_px`: ancho en píxeles de la sidebar activa (0.0 si no hay).
+    pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32, sidebar_ancho_px: f32) {
+        self.sidebar_ancho = sidebar_ancho_px;
+
+        // Actualizar contenido sidebar desde la primera sección de plugin izquierda
+        self.sidebar_lineas = contenido.secciones_plugin.iter()
+            .find(|s| s.lado == "izquierda")
+            .map(|s| s.lineas.clone())
+            .unwrap_or_default();
+
         let alto_editor = (alto - ALTURA_BARRA - ALTURA_TABS).max(1.0);
 
         // — Barra de tabs ──────────────────────────────────────────────────
@@ -257,14 +278,36 @@ impl RendererTexto {
             buffer_barra,
             buffer_gutter,
             buffer_hover,
+            buffer_sidebar,
             metricas,
             metricas_barra,
             scroll_linea,
             ancho_gutter,
             hover_activo,
             hover_pos_px,
+            sidebar_lineas,
             ..
         } = self;
+
+        // — Sidebar ───────────────────────────────────────────────────────
+        if sidebar_ancho_px > 0.0 && !sidebar_lineas.is_empty() {
+            let frags: Vec<(String, Attrs<'static>)> = sidebar_lineas.iter()
+                .map(|l| {
+                    let mut s = l.texto.clone();
+                    s.push('\n');
+                    let color = l.color
+                        .map(|[r, g, b]| Color::rgb(r, g, b))
+                        .unwrap_or(Color::rgb(0xCC, 0xCC, 0xCC));
+                    let attrs = Attrs::new().family(Family::Monospace).color(color);
+                    (s, attrs)
+                })
+                .collect();
+            buffer_sidebar.set_metrics(sistema_fuentes, *metricas);
+            buffer_sidebar.set_size(sistema_fuentes, sidebar_ancho_px - 8.0, alto_editor);
+            let refs: Vec<(&str, Attrs)> = frags.iter().map(|(s, a)| (s.as_str(), *a)).collect();
+            buffer_sidebar.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
+            buffer_sidebar.shape_until_scroll(sistema_fuentes);
+        }
 
         buffer_gutter.set_metrics(sistema_fuentes, *metricas);
         buffer_gutter.set_size(sistema_fuentes, *ancho_gutter, alto_editor);
@@ -276,8 +319,7 @@ impl RendererTexto {
         buffer_gutter.shape_until_scroll(sistema_fuentes);
 
         // — Editor principal ───────────────────────────────────────────────
-        let texto_left = *ancho_gutter;
-        let ancho_editor = (ancho - texto_left).max(1.0);
+        let ancho_editor = (ancho - sidebar_ancho_px - *ancho_gutter).max(1.0);
 
         buffer.set_metrics(sistema_fuentes, *metricas);
         buffer.set_size(sistema_fuentes, ancho_editor, alto_editor);
@@ -342,14 +384,15 @@ impl RendererTexto {
             if let Some(cursor) = contenido.cursor {
                 let char_ancho_local = metricas.font_size * RATIO_CHAR;
                 let linea_visible = cursor.linea as i32 - *scroll_linea;
-                let cx = *ancho_gutter + (cursor.columna as f32 * char_ancho_local) + 4.0;
-                let cy = linea_visible as f32 * metricas.line_height + 8.0;
+                let x_base = sidebar_ancho_px + *ancho_gutter;
+                let cx = x_base + (cursor.columna as f32 * char_ancho_local) + 4.0;
+                let cy = linea_visible as f32 * metricas.line_height + ALTURA_TABS + 8.0;
                 let py = if linea_visible <= 2 {
                     cy + metricas.line_height + 4.0
                 } else {
                     cy - popup_alto - 4.0
                 };
-                *hover_pos_px = (cx.max(*ancho_gutter + 4.0), py.max(8.0));
+                *hover_pos_px = (cx.max(x_base + 4.0), py.max(8.0));
             }
         }
     }
@@ -367,7 +410,10 @@ impl RendererTexto {
         let tabs_top = ALTURA_TABS as i32;
         let alto_editor = (alto as i32) - ALTURA_BARRA as i32;
         let gutter_ancho_i = self.ancho_gutter as i32;
-        let texto_left = self.ancho_gutter;
+        let sidebar_i = self.sidebar_ancho as i32;
+        // Gutter empieza después de la sidebar
+        let gutter_left = sidebar_i;
+        let texto_left = self.sidebar_ancho + self.ancho_gutter;
 
         let Self {
             renderer,
@@ -377,13 +423,18 @@ impl RendererTexto {
             buffer_barra,
             buffer_gutter,
             buffer_hover,
+            buffer_sidebar,
             buffer_tabs,
             cache_formas,
             hover_activo,
             hover_pos_px,
             metricas,
+            sidebar_ancho,
+            sidebar_lineas,
             ..
         } = self;
+
+        let sidebar_visible = *sidebar_ancho > 0.0 && !sidebar_lineas.is_empty();
 
         let mut areas: Vec<TextArea> = vec![
             // 1. Barra de tabs
@@ -400,16 +451,16 @@ impl RendererTexto {
                 },
                 default_color: COLOR_TAB_INACTIVO,
             },
-            // 2. Gutter de números de línea
+            // 2. Gutter de números de línea (offset por sidebar)
             TextArea {
                 buffer: buffer_gutter,
-                left: 4.0,
+                left: gutter_left as f32 + 4.0,
                 top: ALTURA_TABS + 8.0,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: 0,
+                    left: gutter_left,
                     top: tabs_top,
-                    right: gutter_ancho_i,
+                    right: gutter_left + gutter_ancho_i,
                     bottom: alto_editor,
                 },
                 default_color: COLOR_GUTTER,
@@ -421,14 +472,14 @@ impl RendererTexto {
                 top: ALTURA_TABS + 8.0,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: gutter_ancho_i,
+                    left: gutter_left + gutter_ancho_i,
                     top: tabs_top,
                     right: ancho as i32,
                     bottom: alto_editor,
                 },
                 default_color: COLOR_TEXTO,
             },
-            // 3. Barra de estado
+            // 4. Barra de estado
             TextArea {
                 buffer: buffer_barra,
                 left: 8.0,
@@ -444,10 +495,27 @@ impl RendererTexto {
             },
         ];
 
-        // 4. Popup de hover (sólo cuando hay hover activo)
+        // 5. Sidebar (sección de plugin izquierda)
+        if sidebar_visible {
+            areas.push(TextArea {
+                buffer: buffer_sidebar,
+                left: 4.0,
+                top: ALTURA_TABS + 8.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: tabs_top,
+                    right: sidebar_i,
+                    bottom: alto_editor,
+                },
+                default_color: Color::rgb(0xCC, 0xCC, 0xCC),
+            });
+        }
+
+        // 6. Popup de hover (sólo cuando hay hover activo)
         if *hover_activo {
             let (hx, hy) = *hover_pos_px;
-            let hx = hx.min(ancho as f32 - POPUP_ANCHO).max(gutter_ancho_i as f32);
+            let hx = hx.min(ancho as f32 - POPUP_ANCHO).max((gutter_left + gutter_ancho_i) as f32);
             let popup_alto = (metricas.line_height * POPUP_LINEAS as f32 + 4.0) as i32;
             areas.push(TextArea {
                 buffer: buffer_hover,
@@ -479,6 +547,8 @@ impl RendererTexto {
 
     pub fn ancho_gutter(&self) -> f32 { self.ancho_gutter }
     pub fn scroll_linea(&self) -> i32 { self.scroll_linea }
+    #[allow(dead_code)]
+    pub fn sidebar_ancho(&self) -> f32 { self.sidebar_ancho }
 
     /// Emite draw calls de texto dentro de un render pass activo.
     pub fn renderizar_en_pase<'pass>(

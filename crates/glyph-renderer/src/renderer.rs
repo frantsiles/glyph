@@ -15,6 +15,7 @@
 //!
 //! | Tecla          | Modo         | Evento                          |
 //! |---|---|---|
+//! | Ctrl+B         | Normal       | ToggleSidebar                   |
 //! | Caracteres     | Normal       | InsertarTexto                   |
 //! | Enter          | Normal       | InsertarTexto("\n")             |
 //! | Tab            | Normal       | InsertarTexto("    ")           |
@@ -25,7 +26,7 @@
 //! | PgUp/PgDn      | Normal       | PaginaArriba/PaginaAbajo        |
 //! | Ctrl+Home/End  | Normal       | InicioDoc/FinDoc                |
 //! | Ctrl+S/Z/Y/F/H | Normal      | Guardar/Deshacer/Rehacer/...    |
-//! | Click izq.     | Normal       | MoverCursorA                    |
+//! | Click izq.     | Normal       | MoverCursorA / EventoSeccion    |
 //! | Caracteres     | Búsqueda     | ActualizarBusqueda              |
 //! | Enter          | Búsqueda     | SiguienteMatch                  |
 //! | Shift+Enter    | Búsqueda     | MatchAnterior                   |
@@ -52,6 +53,8 @@ use crate::{
     contenido::ContenidoRender,
     eventos::{DireccionCursor, EventoEditor},
     gpu::ContextoGpu,
+    quads::{ColorRgba, QuadRenderer},
+    seccion::{LadoLayout, LayoutManager, SeccionUI, TamanoPref},
     texto::RendererTexto,
 };
 
@@ -67,6 +70,17 @@ enum CampoReemplazo {
     Buscar,
     Reemplazar,
 }
+
+// Color del fondo de la sidebar: ligeramente más oscuro que el editor
+const COLOR_SIDEBAR_FONDO: ColorRgba = ColorRgba { r: 0.098, g: 0.098, b: 0.153, a: 1.0 };
+// Color de la barra de tabs
+const COLOR_TABS_FONDO: ColorRgba = ColorRgba { r: 0.078, g: 0.078, b: 0.122, a: 1.0 };
+// Color de la statusbar
+const COLOR_STATUS_FONDO: ColorRgba = ColorRgba { r: 0.078, g: 0.078, b: 0.122, a: 1.0 };
+
+const ALTURA_TABS_PX: f32 = 32.0;
+const ALTURA_STATUS_PX: f32 = 22.0;
+const ANCHO_SIDEBAR_PX: f32 = 240.0;
 
 pub struct Renderer {
     config: ConfigRenderer,
@@ -101,7 +115,33 @@ impl Renderer {
             config.multiplicador_linea,
             config.familia_fuente.as_deref(),
         );
+        let mut quads = QuadRenderer::nuevo(&gpu.dispositivo, gpu.config_superficie.format);
+
+        // Layout manager con secciones del sistema
+        let mut layout = LayoutManager::nuevo();
+        layout.registrar(SeccionUI {
+            id: "tabs".into(), lado: LadoLayout::Arriba,
+            tamano_pref: TamanoPref::Fijo(ALTURA_TABS_PX),
+            visible: true, z_order: 0, color_fondo: Some(COLOR_TABS_FONDO),
+        });
+        layout.registrar(SeccionUI {
+            id: "statusbar".into(), lado: LadoLayout::Abajo,
+            tamano_pref: TamanoPref::Fijo(ALTURA_STATUS_PX),
+            visible: true, z_order: 1, color_fondo: Some(COLOR_STATUS_FONDO),
+        });
+        layout.registrar(SeccionUI {
+            id: "sidebar".into(), lado: LadoLayout::Izquierda,
+            tamano_pref: TamanoPref::Fijo(ANCHO_SIDEBAR_PX),
+            visible: false, z_order: 10, color_fondo: Some(COLOR_SIDEBAR_FONDO),
+        });
+        layout.registrar(SeccionUI {
+            id: "editor_area".into(), lado: LadoLayout::Centro,
+            tamano_pref: TamanoPref::Flex(1.0),
+            visible: true, z_order: 2, color_fondo: None,
+        });
+
         let tamano_tab = config.tamano_tab;
+        let linea_alto = config.tamano_fuente * config.multiplicador_linea;
 
         tracing::info!(
             "Glyph iniciado — {}×{} | {}pt",
@@ -115,10 +155,6 @@ impl Renderer {
         let mut reemplazo = String::new();
         let mut campo = CampoReemplazo::Buscar;
         let mut pos_raton = (0.0f32, 0.0f32);
-
-        // Constantes de geometría para conversión click → (línea, col)
-        let char_ancho = config.tamano_fuente * 0.601;
-        let linea_alto = config.tamano_fuente * config.multiplicador_linea;
 
         window.request_redraw();
 
@@ -155,11 +191,9 @@ impl Renderer {
                             if modo == ModoRenderer::Normal =>
                         {
                             let lineas = match delta {
-                                // y positivo = scroll hacia arriba (Wayland devuelve fracciones)
                                 MouseScrollDelta::LineDelta(_, y) => {
                                     if y > 0.01 { -3 } else if y < -0.01 { 3 } else { 0 }
                                 }
-                                // y positivo = bajar contenido (scroll DOWN) en Wayland
                                 MouseScrollDelta::PixelDelta(pos) => {
                                     if pos.y > 0.001 { 3 } else if pos.y < -0.001 { -3 } else { 0 }
                                 }
@@ -170,36 +204,62 @@ impl Renderer {
                             }
                         }
 
-                        // ── Click izquierdo → tabs o cursor ───────────────
+                        // ── Click izquierdo ───────────────────────────────
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
                             button: MouseButton::Left,
                             ..
                         } if modo == ModoRenderer::Normal => {
                             let (mx, my) = pos_raton;
-                            if my < texto.altura_tabs() {
-                                // Click en la barra de tabs
-                                if let Some(idx) = texto.tab_en_posicion(mx) {
-                                    if let Some(nuevo) = manejador(EventoEditor::ActivarTab(idx)) {
-                                        contenido = nuevo;
-                                        window.request_redraw();
+                            let ancho = gpu.config_superficie.width as f32;
+                            let alto = gpu.config_superficie.height as f32;
+
+                            // Calcular layout para saber qué sección se clickeó
+                            let soluciones = layout.calcular(ancho, alto);
+                            let _ = soluciones; // calcular actualiza el estado interno
+
+                            if let Some(id) = layout.seccion_en_posicion(mx, my).cloned() {
+                                if id == "tabs" {
+                                    // Click en la barra de tabs
+                                    if let Some(idx) = texto.tab_en_posicion(mx) {
+                                        if let Some(nuevo) = manejador(EventoEditor::ActivarTab(idx)) {
+                                            contenido = nuevo;
+                                            window.request_redraw();
+                                        }
                                     }
-                                }
-                            } else {
-                                let gutter = texto.ancho_gutter();
-                                let scroll = texto.scroll_linea();
-                                let tx = mx - gutter - 4.0;
-                                let ty = my - texto.altura_tabs() - 8.0;
-                                if tx >= 0.0 && ty >= 0.0 {
-                                    let linea = (ty / linea_alto) as i32 + scroll;
-                                    let col = (tx / char_ancho) as u32;
-                                    let ev = EventoEditor::MoverCursorA {
-                                        linea: linea.max(0) as u32,
-                                        columna: col,
-                                    };
-                                    if let Some(nuevo) = manejador(ev) {
-                                        contenido = nuevo;
-                                        window.request_redraw();
+                                } else if id == "editor_area" {
+                                    // Click en el área del editor (gutter + editor)
+                                    let sidebar_ancho = sidebar_ancho_actual(&layout);
+                                    let gutter = texto.ancho_gutter();
+                                    let scroll = texto.scroll_linea();
+                                    let char_ancho = config.tamano_fuente * 0.601;
+                                    let tx = mx - sidebar_ancho - gutter - 4.0;
+                                    let ty = my - texto.altura_tabs() - 8.0;
+                                    if tx >= 0.0 && ty >= 0.0 {
+                                        let linea = (ty / linea_alto) as i32 + scroll;
+                                        let col = (tx / char_ancho) as u32;
+                                        let ev = EventoEditor::MoverCursorA {
+                                            linea: linea.max(0) as u32,
+                                            columna: col,
+                                        };
+                                        if let Some(nuevo) = manejador(ev) {
+                                            contenido = nuevo;
+                                            window.request_redraw();
+                                        }
+                                    }
+                                } else {
+                                    // Click en una sección de plugin
+                                    if let Some(rect) = layout.rect_seccion(&id).copied() {
+                                        let y_rel = my - rect.y;
+                                        let linea = (y_rel / linea_alto) as u32;
+                                        let ev = EventoEditor::EventoSeccion {
+                                            id_seccion: id,
+                                            linea,
+                                        };
+                                        if let Some(nuevo) = manejador(ev) {
+                                            contenido = nuevo;
+                                            window.request_redraw();
+                                        }
                                     }
                                 }
                             }
@@ -237,6 +297,13 @@ impl Renderer {
                                             reemplazo.clear();
                                             campo = CampoReemplazo::Buscar;
                                         }
+                                        Some(EventoEditor::ToggleSidebar) => {
+                                            let visible_actual = layout.secciones().iter()
+                                                .find(|s| s.id == "sidebar")
+                                                .map(|s| s.visible)
+                                                .unwrap_or(false);
+                                            layout.establecer_visible("sidebar", !visible_actual);
+                                        }
                                         _ => {}
                                     }
                                     opt
@@ -244,15 +311,35 @@ impl Renderer {
                             };
 
                             if let Some(evento) = evento_opt {
+                                // ToggleSidebar no se reenvía a la app
+                                if matches!(evento, EventoEditor::ToggleSidebar) {
+                                    window.request_redraw();
+                                    return;
+                                }
                                 if let Some(nuevo) = manejador(evento) {
                                     contenido = nuevo;
+
+                                    // Sincronizar secciones de plugin en el layout
+                                    sincronizar_secciones_plugin(&mut layout, &contenido);
+
                                     window.request_redraw();
                                 }
                             }
                         }
 
                         WindowEvent::RedrawRequested => {
-                            renderizar_frame(&window, &mut gpu, &mut texto, &contenido);
+                            let ancho = gpu.config_superficie.width;
+                            let alto = gpu.config_superficie.height;
+                            renderizar_frame(
+                                &window,
+                                &mut gpu,
+                                &mut texto,
+                                &mut quads,
+                                &mut layout,
+                                &contenido,
+                                ancho,
+                                alto,
+                            );
                         }
 
                         _ => {}
@@ -263,6 +350,50 @@ impl Renderer {
         })?;
 
         Ok(())
+    }
+}
+
+/// Devuelve el ancho actual de la sidebar (0.0 si no visible).
+fn sidebar_ancho_actual(layout: &LayoutManager) -> f32 {
+    layout.rect_seccion("sidebar").map(|r| r.ancho).unwrap_or(0.0)
+}
+
+/// Registra en el LayoutManager las secciones declaradas por plugins en ContenidoRender.
+fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &ContenidoRender) {
+    // Identificar IDs de secciones de plugin actuales en layout (z_order >= 10)
+    let ids_actuales: Vec<String> = layout.secciones().iter()
+        .filter(|s| s.z_order >= 10)
+        .map(|s| s.id.clone())
+        .collect();
+
+    let ids_nuevas: Vec<String> = contenido.secciones_plugin.iter()
+        .map(|s| s.id.clone())
+        .collect();
+
+    // Quitar secciones que ya no existen
+    for id in &ids_actuales {
+        if !ids_nuevas.contains(id) {
+            layout.quitar(id);
+        }
+    }
+
+    // Añadir/actualizar secciones del contenido
+    for (i, sec) in contenido.secciones_plugin.iter().enumerate() {
+        let lado = match sec.lado.as_str() {
+            "derecha" => LadoLayout::Derecha,
+            "arriba"  => LadoLayout::Arriba,
+            "abajo"   => LadoLayout::Abajo,
+            _         => LadoLayout::Izquierda,
+        };
+        let color_fondo = sec.color_fondo.map(|[r, g, b]| ColorRgba::rgb_u8(r, g, b));
+        layout.registrar(SeccionUI {
+            id: sec.id.clone(),
+            lado,
+            tamano_pref: TamanoPref::Fijo(sec.tamano),
+            visible: true,
+            z_order: 10 + i as i32,
+            color_fondo,
+        });
     }
 }
 
@@ -315,7 +446,6 @@ fn procesar_tecla_reemplazo(
     campo: &mut CampoReemplazo,
 ) -> Option<EventoEditor> {
     if mods.control_key() {
-        // Ctrl+H — reemplazar todo
         if let Key::Character(c) = key {
             if c.as_str() == "h" || c.as_str() == "H" {
                 return Some(EventoEditor::ReemplazarTodo);
@@ -382,6 +512,7 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
                 "x" | "X" => Some(EventoEditor::Cortar),
                 "t" | "T" => Some(EventoEditor::NuevoTab),
                 "w" | "W" => Some(EventoEditor::CerrarTab),
+                "b" | "B" => Some(EventoEditor::ToggleSidebar),
                 _ => None,
             },
             Key::Named(NamedKey::Tab) => {
@@ -471,22 +602,47 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
 // Renderizado de un frame
 // ------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn renderizar_frame(
     ventana: &winit::window::Window,
     gpu: &mut ContextoGpu,
     texto: &mut RendererTexto,
+    quads: &mut QuadRenderer,
+    layout: &mut LayoutManager,
     contenido: &ContenidoRender,
+    ancho: u32,
+    alto: u32,
 ) {
-    let ancho = gpu.config_superficie.width;
-    let alto = gpu.config_superficie.height;
+    let af = ancho as f32;
+    let hf = alto as f32;
 
-    texto.actualizar_contenido(contenido, ancho as f32, alto as f32);
+    // 1. Calcular layout
+    let soluciones = layout.calcular(af, hf);
+
+    // 2. Preparar quads (fondos de sección)
+    // Clonar soluciones para liberar el borrow mutable de layout antes de leer secciones()
+    let soluciones_vec = soluciones.to_vec();
+    quads.limpiar();
+    for sol in &soluciones_vec {
+        let color = layout.secciones().iter()
+            .find(|s| s.id == sol.id)
+            .and_then(|s| s.color_fondo);
+        if let Some(c) = color {
+            quads.agregar_quad(sol.rect, c);
+        }
+    }
+    quads.preparar(&gpu.dispositivo, &gpu.cola, ancho, alto);
+
+    // 3. Preparar texto
+    let sidebar_ancho = layout.rect_seccion("sidebar").map(|r| r.ancho).unwrap_or(0.0);
+    texto.actualizar_contenido(contenido, af, hf, sidebar_ancho);
 
     if let Err(e) = texto.preparar(&gpu.dispositivo, &gpu.cola, ancho, alto) {
         tracing::error!("Error preparando atlas de texto: {e}");
         return;
     }
 
+    // 4. Render pass
     let frame = match gpu.superficie.get_current_texture() {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -495,14 +651,12 @@ fn renderizar_frame(
             return;
         }
         Err(e) => {
-            tracing::error!("Error obteniendo textura de superficie: {e}");
+            tracing::error!("Error obteniendo textura: {e}");
             return;
         }
     };
 
-    let vista = frame
-        .texture
-        .create_view(&wgpu::TextureViewDescriptor::default());
+    let vista = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     let mut encoder = gpu.dispositivo.create_command_encoder(
         &wgpu::CommandEncoderDescriptor { label: Some("encoder_principal") },
     );
@@ -515,7 +669,7 @@ fn renderizar_frame(
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        // Catppuccin Mocha base: #1E1E2E — neutro que complementa wallbash
+                        // Catppuccin Mocha base: #1E1E2E
                         r: 0.118, g: 0.118, b: 0.180, a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
@@ -526,8 +680,11 @@ fn renderizar_frame(
             occlusion_query_set: None,
         });
 
+        // Quads primero (fondos), texto encima
+        quads.renderizar_en_pase(&mut pase);
+
         if let Err(e) = texto.renderizar_en_pase(&mut pase) {
-            tracing::error!("Error renderizando texto en pase GPU: {e}");
+            tracing::error!("Error renderizando texto: {e}");
         }
     }
 

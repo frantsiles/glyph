@@ -92,6 +92,50 @@ pub struct ContextoPlugin {
 }
 
 // ------------------------------------------------------------------
+// Tipos para el sistema de secciones (M5)
+// ------------------------------------------------------------------
+
+/// Una línea de texto con estilo para renderizar en una sección de plugin.
+#[derive(Debug, Clone)]
+pub struct LineaSeccion {
+    pub texto: String,
+    /// Color RGB — None usa el color por defecto de la sección.
+    pub color: Option<[u8; 3]>,
+    pub negrita: bool,
+    /// Datos opacos devueltos al plugin cuando el usuario hace click en esta línea.
+    pub payload: Option<Vec<u8>>,
+}
+
+impl LineaSeccion {
+    pub fn simple(texto: impl Into<String>) -> Self {
+        Self { texto: texto.into(), color: None, negrita: false, payload: None }
+    }
+
+    pub fn con_color(texto: impl Into<String>, color: [u8; 3]) -> Self {
+        Self { texto: texto.into(), color: Some(color), negrita: false, payload: None }
+    }
+}
+
+/// Configuración de una sección declarada por un plugin.
+#[derive(Debug, Clone)]
+pub struct SeccionConfig {
+    pub id: String,
+    /// "izquierda" | "derecha" | "arriba" | "abajo"
+    pub lado: String,
+    /// Tamaño en píxeles (fijo para M5)
+    pub tamano: f32,
+    /// Color de fondo RGB — None usa el color de fondo global del editor.
+    pub color_fondo: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NivelNotificacion {
+    Info,
+    Aviso,
+    Error,
+}
+
+// ------------------------------------------------------------------
 // AccionPlugin — lo que el plugin puede devolver para afectar al editor
 // ------------------------------------------------------------------
 
@@ -105,6 +149,23 @@ pub enum AccionPlugin {
 
     /// Emite un mensaje informativo en el log del editor.
     LogMensaje(String),
+
+    // ── M5: Sistema de secciones ──────────────────────────────────────
+
+    /// Registra una nueva sección visual. Se llama típicamente desde `inicializar`.
+    RegistrarSeccion(SeccionConfig),
+
+    /// Actualiza el contenido visible de una sección. Reemplaza las líneas previas.
+    ActualizarContenidoSeccion { id: String, lineas: Vec<LineaSeccion> },
+
+    /// Elimina una sección registrada.
+    QuitarSeccion(String),
+
+    /// Solicita al editor que abra un archivo en un nuevo tab.
+    AbrirArchivo(String),
+
+    /// Muestra una notificación efímera al usuario.
+    MostrarNotificacion { mensaje: String, nivel: NivelNotificacion },
 }
 
 // ------------------------------------------------------------------
@@ -146,6 +207,12 @@ pub trait Plugin: Send + 'static {
 
     /// Se llama al abrir un archivo.
     fn al_abrir(&mut self, _ctx: &ContextoPlugin) -> Vec<AccionPlugin> {
+        vec![]
+    }
+
+    /// Se llama cuando el usuario hace click en una sección registrada por este plugin.
+    /// `linea` es el índice 0-based de la línea clickeada en `Vec<LineaSeccion>`.
+    fn click_seccion(&mut self, _id_seccion: &str, _linea: u32) -> Vec<AccionPlugin> {
         vec![]
     }
 }
