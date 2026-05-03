@@ -1,11 +1,11 @@
 -- plugin-theme/init.lua
--- Tema One Dark para el editor Glyph
--- Reemplaza los colores predeterminados del host con esta paleta.
+-- Tema Wallbash para el editor Glyph
+-- Paleta derivada del tema wallbash (fondo #1B1A29, acento #F0AAAC).
 
 local M = {}
 
-M.nombre      = "One Dark"
-M.descripcion = "Tema oscuro basado en One Dark de Atom"
+M.nombre      = "Wallbash"
+M.descripcion = "Tema oscuro azul-violeta basado en wallbash"
 M.version     = "1.0.0"
 
 -- Permisos declarados: solo UI (cambiar colores del tema)
@@ -13,19 +13,18 @@ M.permisos = { ui = true }
 
 function M.tema()
     return {
-        -- Sintaxis
-        keyword     = "#C678DD",   -- morado     — fn, let, struct, impl…
-        string      = "#98C379",   -- verde      — "texto", 'c'
-        comment     = "#5C6370",   -- gris       — // …  /* … */
-        ["function"]= "#61AFEF",   -- azul       — nombre de función
-        type        = "#E5C07B",   -- amarillo   — tipos, structs, enums
-        number      = "#D19A66",   -- naranja    — literales numéricos
-        operator    = "#56B6C2",   -- cian       — +, -, =, ::, ->
-        variable    = "#E06C75",   -- rojo       — bindings, parámetros
-        constant    = "#D19A66",   -- naranja    — constantes, statics
-        punctuation = "#ABB2BF",   -- gris claro — {}()[];,.
-        attribute   = "#E5C07B",   -- amarillo   — #[derive…]
-        default     = "#ABB2BF",   -- gris claro — texto no clasificado
+        keyword     = "#F0AAAC",   -- rosa-coral      — fn, let, struct, impl…
+        string      = "#CCDDFF",   -- azul claro       — "texto", 'c'
+        comment     = "#7A8CB4",   -- azul medio        — // …  /* … */  (~4:1 sobre #1E1E2E)
+        ["function"]= "#AFAAF0",   -- lavanda           — nombre de función
+        type        = "#9AD0E6",   -- cian suave        — tipos, structs, enums
+        number      = "#AADCF0",   -- cian claro        — literales numéricos
+        operator    = "#AAC1F0",   -- azul medio        — +, -, =, ::, ->
+        variable    = "#FFFFFF",   -- blanco            — bindings, parámetros
+        constant    = "#AADCF0",   -- cian claro        — constantes, statics
+        punctuation = "#7A92C2",   -- azul-gris         — {}()[];,.
+        attribute   = "#AADCF0",   -- cian claro        — #[derive…]
+        default     = "#FFFFFF",   -- blanco            — texto no clasificado
     }
 end
 

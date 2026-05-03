@@ -19,6 +19,10 @@ glyph-lsp          = { path = "../glyph-lsp" }
 glyph-plugin-host  = { path = "../glyph-plugin-host" }
 plugin-theme       = { path = "../../plugins/plugin-theme" }
 anyhow              = { workspace = true }
+arboard             = { workspace = true }
 tokio               = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
+serde               = { workspace = true }
+toml                = { workspace = true }
+dirs                = { workspace = true }

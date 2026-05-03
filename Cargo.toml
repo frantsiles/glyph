@@ -48,6 +48,9 @@ wasmtime     = { version = "20", features = ["async", "component-model"] }
 # Scripting Lua para plugins simples
 mlua         = { version = "0.9", features = ["lua54", "async", "send", "vendored"] }
 
+# Portapapeles del sistema (cross-platform)
+arboard      = "3"
+
 # Renderizado GPU
 wgpu         = "0.19"
 winit        = "0.29"

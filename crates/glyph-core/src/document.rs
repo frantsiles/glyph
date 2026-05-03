@@ -70,11 +70,132 @@ impl Document {
     }
 
     // ------------------------------------------------------------------
+    // Selección
+    // ------------------------------------------------------------------
+
+    /// Retorna true si hay texto seleccionado.
+    pub fn tiene_seleccion(&self) -> bool {
+        self.cursores[0].tiene_seleccion()
+    }
+
+    /// Selecciona todo el texto del documento (Ctrl+A).
+    pub fn seleccionar_todo(&mut self) {
+        self.cursores[0].anchor = Some(crate::cursor::Posicion::origen());
+        let total = self.buffer.lineas();
+        if total == 0 { return; }
+        let ultima = total - 1;
+        let col = self.longitud_linea(ultima);
+        self.cursores[0].posicion = crate::cursor::Posicion::nueva(ultima, col);
+    }
+
+    /// Retorna el texto seleccionado, si hay selección activa.
+    pub fn texto_seleccionado(&self) -> Option<String> {
+        let sel = self.cursores[0].seleccion()?;
+        let ini = self.buffer.posicion_a_indice(sel.inicio.linea, sel.inicio.columna).ok()?;
+        let fin = self.buffer.posicion_a_indice(sel.fin.linea, sel.fin.columna).ok()?;
+        if ini >= fin { return None; }
+        Some(self.buffer.rango_texto(ini, fin))
+    }
+
+    /// Retorna el rango de bytes de la selección en el texto completo, si la hay.
+    pub fn seleccion_bytes(&self) -> Option<(usize, usize)> {
+        let sel = self.cursores[0].seleccion()?;
+        let ini_char = self.buffer.posicion_a_indice(sel.inicio.linea, sel.inicio.columna).ok()?;
+        let fin_char = self.buffer.posicion_a_indice(sel.fin.linea, sel.fin.columna).ok()?;
+        if ini_char >= fin_char { return None; }
+        Some((
+            self.buffer.char_idx_a_byte(ini_char),
+            self.buffer.char_idx_a_byte(fin_char),
+        ))
+    }
+
+    /// Borra el texto seleccionado y mueve el cursor al inicio. Retorna true si había selección.
+    pub fn borrar_seleccion(&mut self) -> bool {
+        let sel = match self.cursores[0].seleccion() {
+            Some(s) => s,
+            None => return false,
+        };
+        let ini = match self.buffer.posicion_a_indice(sel.inicio.linea, sel.inicio.columna) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let fin = match self.buffer.posicion_a_indice(sel.fin.linea, sel.fin.columna) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        if ini >= fin {
+            self.cursores[0].cancelar_seleccion();
+            return false;
+        }
+        let texto_borrado = self.buffer.rango_texto(ini, fin);
+        self.historia.registrar(Operacion::Eliminar { indice: ini, texto: texto_borrado });
+        self.buffer.eliminar(ini, fin);
+        self.cursores[0].mover_a(sel.inicio.linea, sel.inicio.columna, false);
+        true
+    }
+
+    // ------------------------------------------------------------------
+    // Movimiento con extensión de selección (Shift+Flechas)
+    // ------------------------------------------------------------------
+
+    pub fn mover_cursor_izquierda_sel(&mut self) {
+        let pos = self.cursores[0].posicion;
+        let Ok(indice) = self.buffer.posicion_a_indice(pos.linea, pos.columna) else { return; };
+        if indice == 0 { return; }
+        if let Ok((linea, col)) = self.buffer.indice_a_posicion(indice - 1) {
+            self.cursores[0].mover_a(linea, col, true);
+        }
+    }
+
+    pub fn mover_cursor_derecha_sel(&mut self) {
+        let pos = self.cursores[0].posicion;
+        let Ok(indice) = self.buffer.posicion_a_indice(pos.linea, pos.columna) else { return; };
+        if indice >= self.buffer.caracteres() { return; }
+        if let Ok((linea, col)) = self.buffer.indice_a_posicion(indice + 1) {
+            self.cursores[0].mover_a(linea, col, true);
+        }
+    }
+
+    pub fn mover_cursor_arriba_sel(&mut self) {
+        let pos = self.cursores[0].posicion;
+        if pos.linea == 0 {
+            self.cursores[0].mover_a(0, 0, true);
+            return;
+        }
+        let nueva_linea = pos.linea - 1;
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), true);
+    }
+
+    pub fn mover_cursor_abajo_sel(&mut self) {
+        let pos = self.cursores[0].posicion;
+        let total = self.buffer.lineas();
+        if pos.linea + 1 >= total { return; }
+        let nueva_linea = pos.linea + 1;
+        let max_col = self.longitud_linea(nueva_linea);
+        self.cursores[0].mover_a(nueva_linea, pos.columna.min(max_col), true);
+    }
+
+    pub fn mover_cursor_inicio_linea_sel(&mut self) {
+        let linea = self.cursores[0].posicion.linea;
+        self.cursores[0].mover_a(linea, 0, true);
+    }
+
+    pub fn mover_cursor_fin_linea_sel(&mut self) {
+        let linea = self.cursores[0].posicion.linea;
+        let col = self.longitud_linea(linea);
+        self.cursores[0].mover_a(linea, col, true);
+    }
+
+    // ------------------------------------------------------------------
     // Inserción
     // ------------------------------------------------------------------
 
-    /// Inserta texto en la posición del cursor principal y avanza el cursor.
+    /// Inserta texto en la posición del cursor. Si hay selección activa, la reemplaza.
     pub fn insertar_en_cursor(&mut self, texto: &str) -> Result<()> {
+        // Si hay selección, borrarla primero
+        self.borrar_seleccion();
+
         let pos = self.cursores[0].posicion; // Copy — el borrow termina aquí
         let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
 
@@ -98,8 +219,9 @@ impl Document {
     // Borrado
     // ------------------------------------------------------------------
 
-    /// Borra el carácter inmediatamente antes del cursor (Backspace).
+    /// Borra la selección activa o el carácter antes del cursor (Backspace).
     pub fn borrar_antes_cursor(&mut self) -> Result<()> {
+        if self.borrar_seleccion() { return Ok(()); }
         let pos = self.cursores[0].posicion; // Copy
         let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
 
@@ -125,8 +247,9 @@ impl Document {
         Ok(())
     }
 
-    /// Borra el carácter inmediatamente después del cursor (Delete).
+    /// Borra la selección activa o el carácter después del cursor (Delete).
     pub fn borrar_despues_cursor(&mut self) -> Result<()> {
+        if self.borrar_seleccion() { return Ok(()); }
         let pos = self.cursores[0].posicion; // Copy
         let indice = self.buffer.posicion_a_indice(pos.linea, pos.columna)?;
 

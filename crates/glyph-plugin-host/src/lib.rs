@@ -36,18 +36,18 @@ use crate::wasm::PluginWasm;
 
 fn tema_por_defecto() -> HashMap<String, [u8; 3]> {
     [
-        ("keyword",     [0xC6, 0x78, 0xDD]),
-        ("string",      [0x98, 0xC3, 0x79]),
-        ("comment",     [0x5C, 0x63, 0x70]),
-        ("function",    [0x61, 0xAF, 0xEF]),
-        ("type",        [0xE5, 0xC0, 0x7B]),
-        ("number",      [0xD1, 0x9A, 0x66]),
-        ("operator",    [0x56, 0xB6, 0xC2]),
-        ("variable",    [0xE0, 0x6C, 0x75]),
-        ("constant",    [0xD1, 0x9A, 0x66]),
-        ("punctuation", [0xAB, 0xB2, 0xBF]),
-        ("attribute",   [0xE5, 0xC0, 0x7B]),
-        ("default",     [0xAB, 0xB2, 0xBF]),
+        ("keyword",     [0xF0, 0xAA, 0xAC]),  // rosa-coral    — wallbash
+        ("string",      [0xCC, 0xDD, 0xFF]),  // azul claro
+        ("comment",     [0x7A, 0x8C, 0xB4]),  // azul medio (~4:1 sobre #1E1E2E)
+        ("function",    [0xAF, 0xAA, 0xF0]),  // lavanda
+        ("type",        [0x9A, 0xD0, 0xE6]),  // cian suave
+        ("number",      [0xAA, 0xDC, 0xF0]),  // cian claro
+        ("operator",    [0xAA, 0xC1, 0xF0]),  // azul medio
+        ("variable",    [0xFF, 0xFF, 0xFF]),  // blanco
+        ("constant",    [0xAA, 0xDC, 0xF0]),  // cian claro
+        ("punctuation", [0x7A, 0x92, 0xC2]),  // azul-gris
+        ("attribute",   [0xAA, 0xDC, 0xF0]),  // cian claro
+        ("default",     [0xFF, 0xFF, 0xFF]),  // blanco
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

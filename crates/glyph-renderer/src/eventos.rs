@@ -80,4 +80,19 @@ pub enum EventoEditor {
 
     /// Pedir información de hover LSP en la posición del cursor (Ctrl+K)
     PedirHover,
+
+    /// Seleccionar todo el documento (Ctrl+A)
+    SeleccionarTodo,
+
+    /// Mover cursor extendiendo la selección activa (Shift+Flecha / Shift+Home / Shift+End)
+    ExtenderSeleccion(DireccionCursor),
+
+    /// Copiar texto seleccionado al portapapeles (Ctrl+C)
+    Copiar,
+
+    /// Cortar texto seleccionado al portapapeles (Ctrl+X)
+    Cortar,
+
+    /// Pegar texto desde el portapapeles (Ctrl+V)
+    Pegar,
 }

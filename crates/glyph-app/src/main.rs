@@ -12,6 +12,9 @@
 //! glyph archivo.rs       # abre un archivo existente (o crea uno nuevo)
 //! ```
 
+mod config_app;
+
+use config_app::ConfigApp;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -19,6 +22,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
+use arboard::Clipboard;
 use glyph_core::{
     resaltado::{Lenguaje, Resaltador, TipoResaltado},
     Document,
@@ -42,6 +46,8 @@ fn main() -> Result<()> {
         .init();
 
     tracing::info!("Glyph — Every character matters");
+
+    let cfg = ConfigApp::cargar();
 
     let ruta_archivo: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
 
@@ -129,9 +135,22 @@ fn main() -> Result<()> {
         .map(|n| format!("{n} — Glyph"))
         .unwrap_or_else(|| "Sin título — Glyph".to_string());
 
+    // Determinar configuración por tipo de archivo
+    let ext = ruta_archivo
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let cfg_lang = cfg.para_extension(ext);
+
     let config = ConfigRenderer {
         titulo,
-        ..ConfigRenderer::default()
+        ancho: cfg.ventana.ancho,
+        alto: cfg.ventana.alto,
+        tamano_fuente: cfg_lang.tamano_fuente.unwrap_or(cfg.editor.tamano_fuente),
+        multiplicador_linea: cfg.editor.interlineado,
+        familia_fuente: cfg_lang.familia_fuente.or(cfg.editor.familia_fuente),
+        tamano_tab: cfg_lang.tamano_tab.unwrap_or(4),
     };
 
     let uri_doc: Option<Url> = ruta_archivo
@@ -155,6 +174,9 @@ fn main() -> Result<()> {
     // ── Estado de hover (vive en el closure del event loop) ────────────
     let mut hover_actual: Option<String> = None;
 
+    // ── Portapapeles del sistema ────────────────────────────────────────
+    let mut clipboard = Clipboard::new().ok();
+
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
         let modifica_texto = matches!(
             evento,
@@ -165,13 +187,18 @@ fn main() -> Result<()> {
                 | EventoEditor::Rehacer
                 | EventoEditor::ReemplazarMatch
                 | EventoEditor::ReemplazarTodo
+                | EventoEditor::Cortar
+                | EventoEditor::Pegar
         );
 
         // Cualquier acción que mueve el cursor o modifica el texto descarta el hover
         let descarta_hover = modifica_texto
             || matches!(
                 evento,
-                EventoEditor::MoverCursor(_) | EventoEditor::MoverCursorA { .. }
+                EventoEditor::MoverCursor(_)
+                    | EventoEditor::MoverCursorA { .. }
+                    | EventoEditor::ExtenderSeleccion(_)
+                    | EventoEditor::SeleccionarTodo
             );
         if descarta_hover {
             hover_actual = None;
@@ -338,6 +365,66 @@ fn main() -> Result<()> {
             // ── Click de ratón ────────────────────────────────────────
             EventoEditor::MoverCursorA { linea, columna } => {
                 documento.mover_cursor_a(linea as usize, columna as usize);
+            }
+
+            // ── Selección y clipboard ─────────────────────────────────
+            EventoEditor::SeleccionarTodo => {
+                documento.seleccionar_todo();
+            }
+            EventoEditor::ExtenderSeleccion(dir) => {
+                match dir {
+                    DireccionCursor::Izquierda   => documento.mover_cursor_izquierda_sel(),
+                    DireccionCursor::Derecha      => documento.mover_cursor_derecha_sel(),
+                    DireccionCursor::Arriba       => documento.mover_cursor_arriba_sel(),
+                    DireccionCursor::Abajo        => documento.mover_cursor_abajo_sel(),
+                    DireccionCursor::InicioLinea  => documento.mover_cursor_inicio_linea_sel(),
+                    DireccionCursor::FinLinea     => documento.mover_cursor_fin_linea_sel(),
+                    // PaginaArriba/Abajo/InicioDoc/FinDoc no extienden selección
+                    _ => {}
+                }
+            }
+            EventoEditor::Copiar => {
+                if let Some(texto) = documento.texto_seleccionado() {
+                    if let Some(cb) = &mut clipboard {
+                        if let Err(e) = cb.set_text(&texto) {
+                            tracing::warn!("Error al copiar al portapapeles: {e}");
+                        }
+                    }
+                }
+                return None; // no cambia el documento
+            }
+            EventoEditor::Cortar => {
+                if let Some(texto) = documento.texto_seleccionado() {
+                    if let Some(cb) = &mut clipboard {
+                        if let Err(e) = cb.set_text(&texto) {
+                            tracing::warn!("Error al cortar al portapapeles: {e}");
+                        }
+                    }
+                    documento.borrar_seleccion();
+                    if en_busqueda {
+                        matches_actuales = documento.buscar(&consulta_actual);
+                        match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                    }
+                } else {
+                    return None;
+                }
+            }
+            EventoEditor::Pegar => {
+                let texto_pegado = clipboard
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok())
+                    .unwrap_or_default();
+                if texto_pegado.is_empty() {
+                    return None;
+                }
+                if let Err(e) = documento.insertar_en_cursor(&texto_pegado) {
+                    tracing::error!("Error pegando texto: {e}");
+                    return None;
+                }
+                if en_busqueda {
+                    matches_actuales = documento.buscar(&consulta_actual);
+                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                }
             }
 
             // ── Hover LSP (Ctrl+K) ────────────────────────────────────
@@ -554,6 +641,7 @@ fn documento_a_contenido(
         match_activo,
         barra_estado,
         hover_texto,
+        seleccion_bytes: doc.seleccion_bytes(),
     }
 }
 
@@ -602,12 +690,18 @@ fn construir_barra_estado(
     } else {
         let nombre = nombre_archivo.unwrap_or("Sin título");
         let pos = doc.cursor_principal().posicion;
-        let errores = if n_errores > 0 {
-            format!(" | {n_errores} error(es) LSP")
+        let sel = if doc.tiene_seleccion() {
+            let n = doc.texto_seleccionado().map(|t| t.chars().count()).unwrap_or(0);
+            format!(" | Sel: {n}")
         } else {
             String::new()
         };
-        format!("{nombre} | Ln {}, Col {}{}", pos.linea + 1, pos.columna + 1, errores)
+        let errores = if n_errores > 0 {
+            format!(" | {n_errores} error(es)")
+        } else {
+            String::new()
+        };
+        format!("{nombre} | Ln {}, Col {}{}{}", pos.linea + 1, pos.columna + 1, sel, errores)
     }
 }
 

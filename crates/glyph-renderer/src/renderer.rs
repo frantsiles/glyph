@@ -41,7 +41,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use winit::{
     dpi::PhysicalSize,
-    event::{ElementState, Event, MouseButton, WindowEvent},
+    event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::WindowBuilder,
@@ -99,7 +99,9 @@ impl Renderer {
             gpu.config_superficie.format,
             config.tamano_fuente,
             config.multiplicador_linea,
+            config.familia_fuente.as_deref(),
         );
+        let tamano_tab = config.tamano_tab;
 
         tracing::info!(
             "Glyph iniciado — {}×{} | {}pt",
@@ -148,6 +150,26 @@ impl Renderer {
                             pos_raton = (position.x as f32, position.y as f32);
                         }
 
+                        // ── Rueda del ratón → scroll ──────────────────────
+                        WindowEvent::MouseWheel { delta, .. }
+                            if modo == ModoRenderer::Normal =>
+                        {
+                            let lineas = match delta {
+                                // y positivo = scroll hacia arriba (Wayland devuelve fracciones)
+                                MouseScrollDelta::LineDelta(_, y) => {
+                                    if y > 0.01 { -3 } else if y < -0.01 { 3 } else { 0 }
+                                }
+                                // y positivo = bajar contenido (scroll DOWN) en Wayland
+                                MouseScrollDelta::PixelDelta(pos) => {
+                                    if pos.y > 0.001 { 3 } else if pos.y < -0.001 { -3 } else { 0 }
+                                }
+                            };
+                            if lineas != 0 {
+                                texto.ajustar_scroll(lineas);
+                                window.request_redraw();
+                            }
+                        }
+
                         // ── Click izquierdo → mover cursor ────────────────
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
@@ -192,7 +214,7 @@ impl Renderer {
                                     )
                                 }
                                 ModoRenderer::Normal => {
-                                    let opt = resolver_evento(key, text, mods);
+                                    let opt = resolver_evento(key, text, mods, tamano_tab);
                                     match &opt {
                                         Some(EventoEditor::IniciarBusqueda) => {
                                             modo = ModoRenderer::Busqueda;
@@ -333,7 +355,7 @@ fn procesar_tecla_reemplazo(
 // Traducción de teclas → EventoEditor (modo Normal)
 // ------------------------------------------------------------------
 
-fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState) -> Option<EventoEditor> {
+fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_tab: usize) -> Option<EventoEditor> {
     if mods.control_key() {
         return match key {
             Key::Character(c) => match c.as_str() {
@@ -343,6 +365,10 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState) -> Optio
                 "f" | "F" => Some(EventoEditor::IniciarBusqueda),
                 "h" | "H" => Some(EventoEditor::IniciarReemplazo),
                 "k" | "K" => Some(EventoEditor::PedirHover),
+                "a" | "A" => Some(EventoEditor::SeleccionarTodo),
+                "c" | "C" => Some(EventoEditor::Copiar),
+                "v" | "V" => Some(EventoEditor::Pegar),
+                "x" | "X" => Some(EventoEditor::Cortar),
                 _ => None,
             },
             Key::Named(NamedKey::Home) => {
@@ -355,32 +381,58 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState) -> Optio
         };
     }
 
+    let shift = mods.shift_key();
+
     match key {
         Key::Named(NamedKey::Enter) => {
             return Some(EventoEditor::InsertarTexto("\n".to_string()));
         }
         Key::Named(NamedKey::Tab) => {
-            return Some(EventoEditor::InsertarTexto("    ".to_string()));
+            return Some(EventoEditor::InsertarTexto(" ".repeat(tamano_tab)));
         }
         Key::Named(NamedKey::Backspace) => return Some(EventoEditor::BorrarAtras),
         Key::Named(NamedKey::Delete) => return Some(EventoEditor::BorrarAdelante),
         Key::Named(NamedKey::ArrowLeft) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::Izquierda));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Izquierda))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::Izquierda))
+            };
         }
         Key::Named(NamedKey::ArrowRight) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::Derecha));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Derecha))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::Derecha))
+            };
         }
         Key::Named(NamedKey::ArrowUp) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::Arriba));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Arriba))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::Arriba))
+            };
         }
         Key::Named(NamedKey::ArrowDown) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::Abajo));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::Abajo))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::Abajo))
+            };
         }
         Key::Named(NamedKey::Home) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::InicioLinea));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::InicioLinea))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::InicioLinea))
+            };
         }
         Key::Named(NamedKey::End) => {
-            return Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea));
+            return if shift {
+                Some(EventoEditor::ExtenderSeleccion(DireccionCursor::FinLinea))
+            } else {
+                Some(EventoEditor::MoverCursor(DireccionCursor::FinLinea))
+            };
         }
         Key::Named(NamedKey::PageUp) => {
             return Some(EventoEditor::MoverCursor(DireccionCursor::PaginaArriba));
@@ -443,7 +495,8 @@ fn renderizar_frame(
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.118, g: 0.118, b: 0.141, a: 1.0,
+                        // Catppuccin Mocha base: #1E1E2E — neutro que complementa wallbash
+                        r: 0.118, g: 0.118, b: 0.180, a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
                 },

@@ -37,14 +37,17 @@ use glyphon::{
 
 use crate::contenido::{ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto};
 
-const COLOR_TEXTO: Color = Color::rgb(0xCC, 0xCC, 0xCC);
-const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xCC, 0x00);
-const COLOR_MATCH: Color = Color::rgb(0xFF, 0xCC, 0x00);
-const COLOR_MATCH_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);
-const COLOR_TEXTO_BARRA: Color = Color::rgb(0x98, 0xA0, 0xAD);
-const COLOR_GUTTER: Color = Color::rgb(0x4B, 0x52, 0x63);
-const COLOR_GUTTER_ACTIVO: Color = Color::rgb(0xAB, 0xB2, 0xBF);
-const COLOR_HOVER: Color = Color::rgb(0xE5, 0xC0, 0x7B); // amarillo dorado One Dark
+
+// Wallbash — paleta derivada del tema wallbash
+const COLOR_TEXTO: Color = Color::rgb(0xFF, 0xFF, 0xFF);         // #FFFFFF texto principal
+const COLOR_CURSOR: Color = Color::rgb(0xFF, 0xFF, 0xFF);        // #FFFFFF cursor
+const COLOR_SELECCION: Color = Color::rgb(0x7A, 0xA2, 0xF7);    // #7AA2F7 azul selección
+const COLOR_MATCH: Color = Color::rgb(0x9A, 0xB3, 0xE6);        // #9AB3E6 match inactivo
+const COLOR_MATCH_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);  // blanco — match activo
+const COLOR_TEXTO_BARRA: Color = Color::rgb(0xFF, 0xFF, 0xFF);   // #FFFFFF barra estado
+const COLOR_GUTTER: Color = Color::rgb(0x65, 0x7A, 0xA3);       // #657AA3 número inactivo
+const COLOR_GUTTER_ACTIVO: Color = Color::rgb(0xF0, 0xAA, 0xAC);// #F0AAAC número activo
+const COLOR_HOVER: Color = Color::rgb(0xFF, 0xFF, 0xFF);         // blanco hover
 
 const ALTURA_BARRA: f32 = 22.0;
 const MARGEN_SCROLL: i32 = 3;
@@ -81,6 +84,8 @@ pub struct RendererTexto {
     hover_activo: bool,
     /// posición en píxeles donde anclar el popup (esquina superior-izquierda)
     hover_pos_px: (f32, f32),
+    /// Posición del cursor en el frame anterior — para detectar si se movió
+    cursor_anterior: Option<CursorRender>,
 }
 
 impl RendererTexto {
@@ -90,8 +95,13 @@ impl RendererTexto {
         formato: wgpu::TextureFormat,
         tamano_fuente: f32,
         multiplicador_linea: f32,
+        familia_fuente: Option<&str>,
     ) -> Self {
         let mut sistema_fuentes = FontSystem::new();
+        if let Some(familia) = familia_fuente {
+            sistema_fuentes.db_mut().set_monospace_family(familia);
+            tracing::info!("Fuente configurada: '{familia}'");
+        }
         let cache_formas = SwashCache::new();
         let mut atlas = TextAtlas::new(dispositivo, cola, formato);
         let renderer = TextRenderer::new(
@@ -132,25 +142,36 @@ impl RendererTexto {
             ancho_gutter: 48.0,
             hover_activo: false,
             hover_pos_px: (0.0, 0.0),
+            cursor_anterior: None,
         }
+    }
+
+    /// Ajusta el scroll manualmente (rueda del ratón).
+    /// El cursor tracking no anulará este ajuste mientras el cursor no se mueva.
+    pub fn ajustar_scroll(&mut self, delta: i32) {
+        self.scroll_linea = (self.scroll_linea + delta).max(0);
     }
 
     /// Actualiza los buffers de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
         let alto_editor = (alto - ALTURA_BARRA).max(1.0);
 
-        // — Scroll tracking: mantener cursor visible ───────────────────────
-        if let Some(cursor) = contenido.cursor {
-            let cursor_line = cursor.linea as i32;
-            let visible_lines = (alto_editor / self.metricas.line_height) as i32;
-            let visible_lines = visible_lines.max(1);
+        // — Scroll tracking: solo activa cuando el cursor se mueve ──────────
+        let cursor_movio = contenido.cursor != self.cursor_anterior;
+        if cursor_movio {
+            if let Some(cursor) = contenido.cursor {
+                let cursor_line = cursor.linea as i32;
+                let visible_lines = (alto_editor / self.metricas.line_height) as i32;
+                let visible_lines = visible_lines.max(1);
 
-            if cursor_line < self.scroll_linea + MARGEN_SCROLL {
-                self.scroll_linea = (cursor_line - MARGEN_SCROLL).max(0);
-            } else if cursor_line >= self.scroll_linea + visible_lines - MARGEN_SCROLL {
-                self.scroll_linea = (cursor_line - visible_lines + 1 + MARGEN_SCROLL).max(0);
+                if cursor_line < self.scroll_linea + MARGEN_SCROLL {
+                    self.scroll_linea = (cursor_line - MARGEN_SCROLL).max(0);
+                } else if cursor_line >= self.scroll_linea + visible_lines - MARGEN_SCROLL {
+                    self.scroll_linea = (cursor_line - visible_lines + 1 + MARGEN_SCROLL).max(0);
+                }
             }
         }
+        self.cursor_anterior = contenido.cursor;
 
         // — Gutter (números de línea) ──────────────────────────────────────
         let total_lineas = contenido.lineas.len().max(1);
@@ -188,10 +209,11 @@ impl RendererTexto {
 
         buffer_gutter.set_metrics(sistema_fuentes, *metricas);
         buffer_gutter.set_size(sistema_fuentes, *ancho_gutter, alto_editor);
-        buffer_gutter.set_scroll(*scroll_linea);
         let gutter_refs: Vec<(&str, Attrs)> =
             gutter_frags.iter().map(|(s, a)| (s.as_str(), *a)).collect();
         buffer_gutter.set_rich_text(sistema_fuentes, gutter_refs, Shaping::Basic);
+        // set_scroll DESPUÉS de set_rich_text para no ser anulado
+        buffer_gutter.set_scroll(*scroll_linea);
         buffer_gutter.shape_until_scroll(sistema_fuentes);
 
         // — Editor principal ───────────────────────────────────────────────
@@ -200,7 +222,6 @@ impl RendererTexto {
 
         buffer.set_metrics(sistema_fuentes, *metricas);
         buffer.set_size(sistema_fuentes, ancho_editor, alto_editor);
-        buffer.set_scroll(*scroll_linea);
 
         let texto = contenido.texto_completo();
         let cursor_byte = contenido.cursor.map(|c| cursor_byte_offset(&contenido.lineas, c));
@@ -208,6 +229,7 @@ impl RendererTexto {
         let fragmentos = construir_spans_glyphon(
             &texto,
             &contenido.spans,
+            contenido.seleccion_bytes,
             &contenido.matches_busqueda,
             contenido.match_activo,
             &contenido.diagnosticos,
@@ -218,6 +240,8 @@ impl RendererTexto {
             fragmentos.iter().map(|(s, a)| (s.as_str(), *a)).collect();
 
         buffer.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
+        // set_scroll DESPUÉS de set_rich_text para no ser anulado
+        buffer.set_scroll(*scroll_linea);
         buffer.shape_until_scroll(sistema_fuentes);
 
         // — Barra de estado ────────────────────────────────────────────────
@@ -400,6 +424,7 @@ impl RendererTexto {
 fn construir_spans_glyphon(
     texto: &str,
     spans: &[SpanTexto],
+    seleccion: Option<(usize, usize)>,
     matches: &[(usize, usize)],
     match_activo: Option<usize>,
     diagnosticos: &[DiagnosticoRender],
@@ -426,6 +451,10 @@ fn construir_spans_glyphon(
     for d in diagnosticos {
         fronteras.push(d.inicio_byte.min(total));
         fronteras.push(d.fin_byte.min(total));
+    }
+    if let Some((ss, se)) = seleccion {
+        fronteras.push(ss.min(total));
+        fronteras.push(se.min(total));
     }
     for &(ini, fin) in matches {
         fronteras.push(ini.min(total));
@@ -510,6 +539,17 @@ fn construir_spans_glyphon(
                 resultado.push((
                     texto[seg_ini..seg_fin].to_string(),
                     Attrs::new().family(Family::Monospace).color(COLOR_MATCH_ACTIVO),
+                ));
+                continue;
+            }
+        }
+
+        // Prioridad 2.5: selección (supera sintaxis, cediendo a matches y diagnósticos)
+        if let Some((ss, se)) = seleccion {
+            if mid >= ss && mid < se {
+                resultado.push((
+                    texto[seg_ini..seg_fin].to_string(),
+                    Attrs::new().family(Family::Monospace).color(COLOR_SELECCION),
                 ));
                 continue;
             }

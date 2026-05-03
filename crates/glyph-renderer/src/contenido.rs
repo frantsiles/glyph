@@ -55,7 +55,7 @@ pub struct DiagnosticoRender {
 }
 
 /// Posición del cursor para renderizar (independiente de `glyph_core::Posicion`)
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CursorRender {
     /// Línea del cursor (0-indexado)
     pub linea: u32,
@@ -92,6 +92,9 @@ pub struct ContenidoRender {
 
     /// Texto de hover LSP — Some muestra el popup flotante, None lo oculta
     pub hover_texto: Option<String>,
+
+    /// Selección activa como rango de bytes en `texto_completo()` — None si no hay selección
+    pub seleccion_bytes: Option<(usize, usize)>,
 }
 
 impl ContenidoRender {
@@ -107,6 +110,7 @@ impl ContenidoRender {
             match_activo: None,
             barra_estado: String::new(),
             hover_texto: None,
+            seleccion_bytes: None,
         }
     }
 

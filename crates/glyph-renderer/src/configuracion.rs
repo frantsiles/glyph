@@ -20,6 +20,12 @@ pub struct ConfigRenderer {
 
     /// Altura de línea como múltiplo del tamaño de fuente
     pub multiplicador_linea: f32,
+
+    /// Familia tipográfica del editor (None → monospace del sistema)
+    pub familia_fuente: Option<String>,
+
+    /// Espacios que inserta la tecla Tab
+    pub tamano_tab: usize,
 }
 
 impl Default for ConfigRenderer {
@@ -30,6 +36,8 @@ impl Default for ConfigRenderer {
             alto: 720,
             tamano_fuente: 16.0,
             multiplicador_linea: 1.4,
+            familia_fuente: None,
+            tamano_tab: 4,
         }
     }
 }

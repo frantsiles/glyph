@@ -61,11 +61,12 @@ impl ContextoGpu {
 
         let capacidades = superficie.get_capabilities(&adaptador);
 
-        // Preferir formato sRGB si está disponible
+        // Preferir formato no-sRGB: los colores hex se pasan directamente sin corrección gamma.
+        // Con sRGB el driver aplica gamma y los valores 0xRR/255 quedan lavados.
         let formato = capacidades
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(capacidades.formats[0]);
 
