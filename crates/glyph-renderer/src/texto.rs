@@ -53,7 +53,7 @@ const ALTURA_BARRA: f32 = 22.0;
 const ALTURA_TABS: f32 = 32.0;
 
 const COLOR_TAB_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);   // blanco — tab visible
-const COLOR_TAB_INACTIVO: Color = Color::rgb(0x57, 0x6A, 0x8F); // azul muted — tab inactivo
+const COLOR_TAB_INACTIVO: Color = Color::rgb(0xA2, 0xAE, 0xC8); // azul claro — tab inactivo
 const COLOR_TAB_PUNTO: Color = Color::rgb(0xF0, 0xAA, 0xAC);    // rosa — punto de modificado
 const MARGEN_SCROLL: i32 = 3;
 // Fracción del tamaño de fuente que ocupa un carácter monoespaciado en anchura
