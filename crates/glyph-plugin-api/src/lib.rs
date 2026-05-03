@@ -89,6 +89,8 @@ pub struct ContextoPlugin {
     pub ruta: Option<String>,
     /// Versión del documento (se incrementa en cada cambio)
     pub version_doc: u32,
+    /// Plugin que provocó la edición, usado para evitar loops de notificación.
+    pub origen_plugin: Option<String>,
 }
 
 // ------------------------------------------------------------------
@@ -136,6 +138,26 @@ pub enum NivelNotificacion {
 }
 
 // ------------------------------------------------------------------
+// Tipos para decoraciones en el gutter (M6)
+// ------------------------------------------------------------------
+
+/// Estado de una línea para la decoración del gutter.
+#[derive(Debug, Clone)]
+pub enum EstadoGutter {
+    Añadido,
+    Modificado,
+    Borrado,
+}
+
+/// Decoración de una línea en el editor, típicamente usada por `plugin-git`.
+#[derive(Debug, Clone)]
+pub struct DecoracionLinea {
+    /// Línea 0-based a decorar.
+    pub linea: u32,
+    pub estado: EstadoGutter,
+}
+
+// ------------------------------------------------------------------
 // AccionPlugin — lo que el plugin puede devolver para afectar al editor
 // ------------------------------------------------------------------
 
@@ -163,6 +185,12 @@ pub enum AccionPlugin {
 
     /// Solicita al editor que abra un archivo en un nuevo tab.
     AbrirArchivo(String),
+
+    /// Reemplaza todo el contenido del buffer activo.
+    ReemplazarContenidoBuffer { contenido: String, origen_plugin: String },
+
+    /// Solicita decoraciones de línea en el gutter.
+    DecorarLineas(Vec<DecoracionLinea>),
 
     /// Muestra una notificación efímera al usuario.
     MostrarNotificacion { mensaje: String, nivel: NivelNotificacion },

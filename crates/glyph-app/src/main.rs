@@ -419,7 +419,17 @@ fn main() -> Result<()> {
                                 tab.documento.buffer.marcar_guardado();
                                 tab.modificado = false;
                                 tracing::info!("Guardado: {}", ruta.display());
-                                host.al_guardar(ruta.to_str());
+                                let acciones_plugin = host.al_guardar(ruta.to_str(), None);
+                                procesar_acciones_plugin(
+                                    acciones_plugin,
+                                    &mut gestor,
+                                    &mut host,
+                                    &mut hover_actual,
+                                    &diagnosticos_compartidos,
+                                    &resaltador,
+                                    &tx_lsp,
+                                    &version_doc,
+                                );
                             }
                             Err(e) => tracing::error!("Error guardando {}: {e}", ruta.display()),
                         }
@@ -632,7 +642,17 @@ fn main() -> Result<()> {
                 let _ = tx_lsp.send((uri.clone(), texto, version));
                 let ruta_str = gestor.tab().ruta.as_ref()
                     .and_then(|p| p.to_str()).map(|s| s.to_string());
-                host.al_cambiar(ruta_str.as_deref(), version as u32);
+                let acciones_plugin = host.al_cambiar(ruta_str.as_deref(), version as u32, None);
+                procesar_acciones_plugin(
+                    acciones_plugin,
+                    &mut gestor,
+                    &mut host,
+                    &mut hover_actual,
+                    &diagnosticos_compartidos,
+                    &resaltador,
+                    &tx_lsp,
+                    &version_doc,
+                );
             }
         }
 
@@ -805,6 +825,66 @@ fn abrir_archivo_en_tab(
     gestor.tabs.push(tab);
     gestor.activo = gestor.tabs.len() - 1;
     *hover_actual = None;
+}
+
+fn procesar_acciones_plugin(
+    acciones: Vec<glyph_plugin_api::AccionPlugin>,
+    gestor: &mut GestorTabs,
+    host: &mut HostPlugins,
+    hover_actual: &mut Option<String>,
+    diagnosticos: &Arc<Mutex<Vec<Diagnostic>>>,
+    resaltador: &Resaltador,
+    tx_lsp: &tokio_mpsc::UnboundedSender<(Url, String, i32)>,
+    version_doc: &AtomicI32,
+) {
+    for accion in acciones {
+        match accion {
+            glyph_plugin_api::AccionPlugin::AbrirArchivo(ruta) => {
+                abrir_archivo_en_tab(
+                    gestor,
+                    &ruta,
+                    host,
+                    diagnosticos,
+                    resaltador,
+                    tx_lsp,
+                    hover_actual,
+                );
+            }
+            glyph_plugin_api::AccionPlugin::ReemplazarContenidoBuffer { contenido, origen_plugin } => {
+                let tab = gestor.tab_mut();
+                tab.documento.buffer.reemplazar_todo(&contenido);
+                tab.modificado = true;
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
+                }
+                if let Some(ref uri) = tab.uri {
+                    let version = version_doc.fetch_add(1, Ordering::Relaxed);
+                    let texto = tab.documento.buffer.contenido_completo();
+                    let _ = tx_lsp.send((uri.clone(), texto, version as i32));
+                    let ruta_str = tab.ruta.as_ref().and_then(|p| p.to_str()).map(|s| s.to_string());
+                    let acciones_siguientes = host.al_cambiar(ruta_str.as_deref(), version as u32, Some(&origen_plugin));
+                    if !acciones_siguientes.is_empty() {
+                        procesar_acciones_plugin(
+                            acciones_siguientes,
+                            gestor,
+                            host,
+                            hover_actual,
+                            diagnosticos,
+                            resaltador,
+                            tx_lsp,
+                            version_doc,
+                        );
+                    }
+                }
+            }
+            glyph_plugin_api::AccionPlugin::DecorarLineas(_lineas) => {
+                // Por ahora solo reconocemos la acción; el renderizado se implementará en el siguiente paso.
+            }
+            _ => {}
+        }
+    }
 }
 
 fn documento_a_contenido(

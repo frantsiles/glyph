@@ -124,37 +124,43 @@ impl HostPlugins {
 
     /// Inicializa todos los plugins.
     pub fn inicializar(&mut self) {
-        let acciones = self.recoger_acciones(|p| p.inicializar());
+        let acciones = self.recoger_acciones(|p| p.inicializar(), None);
         for (nombre, accion) in acciones {
-            self.aplicar(accion, &nombre);
+            let _ = self.aplicar_accion(accion, &nombre);
         }
     }
 
     /// Dispara el hook `al_abrir`.
-    pub fn al_abrir(&mut self, ruta: Option<&str>) {
-        let ctx = ContextoPlugin { ruta: ruta.map(|s| s.to_string()), version_doc: 0 };
-        let acciones = self.recoger_acciones(|p| p.al_abrir(&ctx));
-        for (nombre, accion) in acciones {
-            self.aplicar(accion, &nombre);
-        }
+    pub fn al_abrir(&mut self, ruta: Option<&str>) -> Vec<AccionPlugin> {
+        let ctx = ContextoPlugin {
+            ruta: ruta.map(|s| s.to_string()),
+            version_doc: 0,
+            origen_plugin: None,
+        };
+        let acciones = self.recoger_acciones(|p| p.al_abrir(&ctx), None);
+        self.aplicar_acciones(acciones)
     }
 
     /// Dispara el hook `al_cambiar`.
-    pub fn al_cambiar(&mut self, ruta: Option<&str>, version: u32) {
-        let ctx = ContextoPlugin { ruta: ruta.map(|s| s.to_string()), version_doc: version };
-        let acciones = self.recoger_acciones(|p| p.al_cambiar(&ctx));
-        for (nombre, accion) in acciones {
-            self.aplicar(accion, &nombre);
-        }
+    pub fn al_cambiar(&mut self, ruta: Option<&str>, version: u32, origen_plugin: Option<&str>) -> Vec<AccionPlugin> {
+        let ctx = ContextoPlugin {
+            ruta: ruta.map(|s| s.to_string()),
+            version_doc: version,
+            origen_plugin: origen_plugin.map(|s| s.to_string()),
+        };
+        let acciones = self.recoger_acciones(|p| p.al_cambiar(&ctx), origen_plugin);
+        self.aplicar_acciones(acciones)
     }
 
     /// Dispara el hook `al_guardar`.
-    pub fn al_guardar(&mut self, ruta: Option<&str>) {
-        let ctx = ContextoPlugin { ruta: ruta.map(|s| s.to_string()), version_doc: 0 };
-        let acciones = self.recoger_acciones(|p| p.al_guardar(&ctx));
-        for (nombre, accion) in acciones {
-            self.aplicar(accion, &nombre);
-        }
+    pub fn al_guardar(&mut self, ruta: Option<&str>, origen_plugin: Option<&str>) -> Vec<AccionPlugin> {
+        let ctx = ContextoPlugin {
+            ruta: ruta.map(|s| s.to_string()),
+            version_doc: 0,
+            origen_plugin: origen_plugin.map(|s| s.to_string()),
+        };
+        let acciones = self.recoger_acciones(|p| p.al_guardar(&ctx), origen_plugin);
+        self.aplicar_acciones(acciones)
     }
 
     /// Enruta un click de sección al plugin propietario.
@@ -177,12 +183,8 @@ impl HostPlugins {
         // Aplicar las acciones (actualizar estado interno del host)
         let mut acciones_externas = Vec::new();
         for accion in acciones {
-            match &accion {
-                AccionPlugin::AbrirArchivo(ruta) => {
-                    self.archivos_pendientes.push(ruta.clone());
-                    acciones_externas.push(accion);
-                }
-                _ => self.aplicar(accion, &nombre_plugin),
+            if let Some(externa) = self.aplicar_accion(accion, &nombre_plugin) {
+                acciones_externas.push(externa);
             }
         }
         acciones_externas
@@ -215,19 +217,30 @@ impl HostPlugins {
 
     // ── Privados ─────────────────────────────────────────────────────
 
-    fn recoger_acciones<F>(&mut self, mut hook: F) -> Vec<(String, AccionPlugin)>
+    fn recoger_acciones<F>(&mut self, mut hook: F, origen_plugin: Option<&str>) -> Vec<(String, AccionPlugin)>
     where
         F: FnMut(&mut Box<dyn Plugin>) -> Vec<AccionPlugin>,
     {
-        self.plugins.iter_mut()
-            .flat_map(|p| {
-                let nombre = p.nombre().to_string();
-                hook(p).into_iter().map(move |a| (nombre.clone(), a))
-            })
+        let mut acciones = Vec::new();
+        for plugin in self.plugins.iter_mut() {
+            let nombre = plugin.nombre().to_string();
+            if origen_plugin.map_or(false, |or| or == nombre) {
+                continue;
+            }
+            for accion in hook(plugin) {
+                acciones.push((nombre.clone(), accion));
+            }
+        }
+        acciones
+    }
+
+    fn aplicar_acciones(&mut self, acciones: Vec<(String, AccionPlugin)>) -> Vec<AccionPlugin> {
+        acciones.into_iter()
+            .filter_map(|(nombre, accion)| self.aplicar_accion(accion, &nombre))
             .collect()
     }
 
-    fn aplicar(&mut self, accion: AccionPlugin, nombre_plugin: &str) {
+    fn aplicar_accion(&mut self, accion: AccionPlugin, nombre_plugin: &str) -> Option<AccionPlugin> {
         let tiene_ui = self.permisos.get(nombre_plugin).map(|p| p.ui).unwrap_or(false);
         let tiene_leer = self.permisos.get(nombre_plugin).map(|p| p.leer_archivos).unwrap_or(false);
 
@@ -235,20 +248,22 @@ impl HostPlugins {
             AccionPlugin::EstablecerTema(tema) => {
                 if !tiene_ui {
                     tracing::warn!("['{nombre_plugin}'] rechazado: EstablecerTema requiere permiso 'ui'");
-                    return;
+                    return None;
                 }
                 tracing::info!("['{nombre_plugin}'] tema aplicado ({} colores)", tema.len());
                 self.tema_activo = tema;
+                None
             }
 
             AccionPlugin::LogMensaje(msg) => {
                 tracing::info!("['{nombre_plugin}'] {msg}");
+                None
             }
 
             AccionPlugin::RegistrarSeccion(config) => {
                 if !tiene_ui {
                     tracing::warn!("['{nombre_plugin}'] rechazado: RegistrarSeccion requiere 'ui'");
-                    return;
+                    return None;
                 }
                 tracing::info!("['{nombre_plugin}'] sección registrada: '{}'", config.id);
                 self.secciones.insert(config.id.clone(), SeccionRegistrada {
@@ -256,6 +271,7 @@ impl HostPlugins {
                     plugin_nombre: nombre_plugin.to_string(),
                     contenido: Vec::new(),
                 });
+                None
             }
 
             AccionPlugin::ActualizarContenidoSeccion { id, lineas } => {
@@ -264,19 +280,29 @@ impl HostPlugins {
                 } else {
                     tracing::warn!("['{nombre_plugin}'] ActualizarContenidoSeccion: sección '{id}' no registrada");
                 }
+                None
             }
 
             AccionPlugin::QuitarSeccion(id) => {
                 self.secciones.remove(&id);
                 tracing::info!("['{nombre_plugin}'] sección '{id}' eliminada");
+                None
             }
 
             AccionPlugin::AbrirArchivo(ruta) => {
                 if !tiene_leer {
                     tracing::warn!("['{nombre_plugin}'] rechazado: AbrirArchivo requiere 'leer_archivos'");
-                    return;
+                    return None;
                 }
-                self.archivos_pendientes.push(ruta);
+                Some(AccionPlugin::AbrirArchivo(ruta))
+            }
+
+            AccionPlugin::ReemplazarContenidoBuffer { contenido, origen_plugin } => {
+                Some(AccionPlugin::ReemplazarContenidoBuffer { contenido, origen_plugin })
+            }
+
+            AccionPlugin::DecorarLineas(lineas) => {
+                Some(AccionPlugin::DecorarLineas(lineas))
             }
 
             AccionPlugin::MostrarNotificacion { mensaje, nivel } => {
@@ -286,6 +312,7 @@ impl HostPlugins {
                     NivelNotificacion::Error => "ERROR",
                 };
                 tracing::info!("[notificacion {nivel_str}] {mensaje}");
+                None
             }
         }
     }

@@ -50,9 +50,32 @@ local function leer_nivel(dir, nivel)
     return nodos
 end
 
+local function extraer_padre(dir)
+    if not dir or dir == "" then return nil end
+    if dir == "/" then return nil end
+    local padre = dir:match("^(.*)/[^/]+$")
+    if not padre or padre == "" then
+        return "/"
+    end
+    return padre
+end
+
 local function construir_arbol(dir)
     arbol = {}
     if not dir then return end
+
+    local padre = extraer_padre(dir)
+    if padre then
+        table.insert(arbol, {
+            ruta      = padre,
+            nombre    = "..",
+            es_dir    = true,
+            nivel     = 0,
+            expandido = false,
+            subir     = true,
+        })
+    end
+
     -- Nodo raíz
     local nombre_raiz = dir:match("[^/]+$") or dir
     table.insert(arbol, {
@@ -77,17 +100,21 @@ local function generar_lineas()
     for i, nodo in ipairs(arbol) do
         local sangria = string.rep("  ", nodo.nivel)
         local prefijo
-        if nodo.es_dir then
+        if nodo.subir then
+            prefijo = "▴ "
+        elseif nodo.es_dir then
             prefijo = nodo.expandido and "▾ " or "▸ "
         else
             prefijo = "  "
         end
         local texto = sangria .. prefijo .. nodo.nombre
 
-        -- Color: archivo activo = dorado, dirs = azul claro, archivos = blanco
+        -- Color: archivo activo = dorado, subir = magenta, dirs = azul claro, archivos = blanco
         local color
         if nodo.ruta == archivo_activo then
             color = "#E5C07B"  -- dorado
+        elseif nodo.subir then
+            color = "#C678DD"  -- púrpura claro
         elseif nodo.es_dir then
             color = "#61AFEF"  -- azul
         else
@@ -149,7 +176,14 @@ function M.click_seccion(id, linea_idx)
     local nodo = arbol[idx]
     if not nodo then return end
 
-    if nodo.es_dir then
+    if nodo.subir then
+        -- Navegar un nivel arriba en la jerarquía
+        local padre = nodo.ruta
+        if padre and padre ~= directorio_raiz then
+            directorio_raiz = padre
+            construir_arbol(padre)
+        end
+    elseif nodo.es_dir then
         -- Toggle expandir/colapsar
         nodo.expandido = not nodo.expandido
         if nodo.expandido then
