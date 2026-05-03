@@ -63,6 +63,17 @@ pub struct CursorRender {
     pub columna: u32,
 }
 
+/// Información de un tab para renderizar en la barra de tabs
+#[derive(Debug, Clone)]
+pub struct TabInfo {
+    /// Nombre del archivo o "Sin título N"
+    pub nombre: String,
+    /// Si es el tab actualmente visible
+    pub activo: bool,
+    /// Si tiene cambios sin guardar
+    pub modificado: bool,
+}
+
 /// Todo lo que el renderer necesita para dibujar un frame
 #[derive(Debug, Clone)]
 pub struct ContenidoRender {
@@ -95,6 +106,9 @@ pub struct ContenidoRender {
 
     /// Selección activa como rango de bytes en `texto_completo()` — None si no hay selección
     pub seleccion_bytes: Option<(usize, usize)>,
+
+    /// Tabs abiertos — el renderer los muestra en la barra superior
+    pub tabs: Vec<TabInfo>,
 }
 
 impl ContenidoRender {
@@ -111,6 +125,7 @@ impl ContenidoRender {
             barra_estado: String::new(),
             hover_texto: None,
             seleccion_bytes: None,
+            tabs: vec![TabInfo { nombre: "Sin título".into(), activo: true, modificado: false }],
         }
     }
 

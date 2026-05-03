@@ -31,11 +31,104 @@ use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Positi
 use glyph_plugin_host::HostPlugins;
 use glyph_renderer::{
     ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DiagnosticoRender,
-    DireccionCursor, EventoEditor, SeveridadRender, SpanTexto,
+    DireccionCursor, EventoEditor, SeveridadRender, SpanTexto, TabInfo,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 
 const LINEAS_POR_PAGINA: usize = 20;
+
+// ------------------------------------------------------------------
+// Sistema de tabs
+// ------------------------------------------------------------------
+
+struct TabDoc {
+    documento: Document,
+    nombre: String,
+    ruta: Option<PathBuf>,
+    uri: Option<Url>,
+    lenguaje: Lenguaje,
+    en_busqueda: bool,
+    en_reemplazo: bool,
+    consulta: String,
+    reemplazo_str: String,
+    matches: Vec<(usize, usize)>,
+    match_activo: usize,
+    modificado: bool,
+}
+
+impl TabDoc {
+    fn nuevo_vacio(nombre: String) -> Self {
+        Self {
+            documento: Document::nuevo(),
+            nombre,
+            ruta: None,
+            uri: None,
+            lenguaje: Lenguaje::Desconocido,
+            en_busqueda: false,
+            en_reemplazo: false,
+            consulta: String::new(),
+            reemplazo_str: String::new(),
+            matches: Vec::new(),
+            match_activo: 0,
+            modificado: false,
+        }
+    }
+}
+
+struct GestorTabs {
+    tabs: Vec<TabDoc>,
+    activo: usize,
+    contador: usize,
+}
+
+impl GestorTabs {
+    fn nuevo_con(tab: TabDoc) -> Self {
+        Self { tabs: vec![tab], activo: 0, contador: 1 }
+    }
+
+    fn abrir_tab_vacio(&mut self) {
+        self.contador += 1;
+        self.tabs.push(TabDoc::nuevo_vacio(format!("Sin título {}", self.contador)));
+        self.activo = self.tabs.len() - 1;
+    }
+
+    fn cerrar_activo(&mut self) {
+        if self.tabs.len() == 1 {
+            self.contador += 1;
+            self.tabs[0] = TabDoc::nuevo_vacio(format!("Sin título {}", self.contador));
+            return;
+        }
+        self.tabs.remove(self.activo);
+        if self.activo >= self.tabs.len() {
+            self.activo = self.tabs.len() - 1;
+        }
+    }
+
+    fn activar(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.activo = idx;
+        }
+    }
+
+    fn siguiente(&mut self) {
+        self.activo = (self.activo + 1) % self.tabs.len();
+    }
+
+    fn anterior(&mut self) {
+        self.activo = self.activo.checked_sub(1).unwrap_or(self.tabs.len() - 1);
+    }
+
+    fn tab(&self) -> &TabDoc { &self.tabs[self.activo] }
+    fn tab_mut(&mut self) -> &mut TabDoc { &mut self.tabs[self.activo] }
+
+    fn infos_tabs(&self) -> Vec<TabInfo> {
+        self.tabs.iter().enumerate().map(|(i, t)| TabInfo {
+            nombre: t.nombre.clone(),
+            activo: i == self.activo,
+            modificado: t.modificado,
+        }).collect()
+    }
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -51,19 +144,38 @@ fn main() -> Result<()> {
 
     let ruta_archivo: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
 
-    let mut documento = if let Some(ref ruta) = ruta_archivo {
-        if ruta.exists() {
-            let contenido = std::fs::read_to_string(ruta)?;
+    let tab_inicial = if let Some(ref ruta) = ruta_archivo {
+        let contenido_fs = if ruta.exists() {
             tracing::info!("Abriendo: {}", ruta.display());
-            Document::desde_archivo(&contenido, ruta.clone())
+            std::fs::read_to_string(ruta)?
         } else {
             tracing::info!("Archivo nuevo: {}", ruta.display());
-            Document::desde_archivo("", ruta.clone())
+            String::new()
+        };
+        let nombre = ruta.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Sin título".into());
+        let uri = ruta.canonicalize().ok()
+            .and_then(|r| Url::from_file_path(r).ok());
+        let lenguaje = Lenguaje::desde_extension(
+            ruta.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        );
+        TabDoc {
+            documento: Document::desde_archivo(&contenido_fs, ruta.clone()),
+            nombre,
+            ruta: Some(ruta.clone()),
+            uri,
+            lenguaje,
+            en_busqueda: false, en_reemplazo: false,
+            consulta: String::new(), reemplazo_str: String::new(),
+            matches: Vec::new(), match_activo: 0, modificado: false,
         }
     } else {
         tracing::info!("Buffer vacío (sin archivo)");
-        Document::nuevo()
+        TabDoc::nuevo_vacio("Sin título 1".into())
     };
+
+    let mut gestor = GestorTabs::nuevo_con(tab_inicial);
 
     // ── Plugin host — cargar tema desde Lua ───────────────────────────────
     let mut host = HostPlugins::nuevo();
@@ -71,10 +183,9 @@ fn main() -> Result<()> {
         tracing::warn!("No se pudo cargar el tema Lua: {e} — usando tema por defecto");
     }
     host.inicializar();
-    host.al_abrir(ruta_archivo.as_ref().and_then(|p| p.to_str()));
+    host.al_abrir(gestor.tab().ruta.as_ref().and_then(|p| p.to_str()));
 
     let resaltador = Resaltador::nuevo();
-    let lenguaje = lenguaje_del_doc(&ruta_archivo);
 
     let diagnosticos_compartidos: Arc<Mutex<Vec<Diagnostic>>> =
         Arc::new(Mutex::new(Vec::new()));
@@ -84,56 +195,48 @@ fn main() -> Result<()> {
     let (tx_hover_req, rx_hover_req) =
         tokio_mpsc::unbounded_channel::<(Url, Position, std_mpsc::SyncSender<Option<String>>)>();
 
-    if let Some(ref ruta) = ruta_archivo {
+    // LSP solo para el tab inicial (si tiene archivo)
+    if let Some(ref uri) = gestor.tab().uri {
+        let ruta = gestor.tab().ruta.clone().unwrap();
         let ruta_lsp = ruta.canonicalize().unwrap_or_else(|_| ruta.clone());
-        let uri = Url::from_file_path(&ruta_lsp).ok();
+        let uri_lsp = uri.clone();
         let raiz = ruta_lsp
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let texto_inicial = documento.buffer.contenido_completo();
+        let texto_inicial = gestor.tab().documento.buffer.contenido_completo();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("runtime tokio para LSP");
-            rt.block_on(hilo_lsp(uri, texto_inicial, raiz, rx_lsp, rx_hover_req, diag_escritor));
+            rt.block_on(hilo_lsp(Some(uri_lsp), texto_inicial, raiz, rx_lsp, rx_hover_req, diag_escritor));
         });
     }
 
     let version_doc = Arc::new(AtomicI32::new(1));
 
-    let nombre_archivo: Option<String> = ruta_archivo
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned());
-
     let barra_inicial = construir_barra_estado(
-        &documento,
-        nombre_archivo.as_deref(),
-        false,
-        false,
-        "",
-        "",
-        &[],
-        0,
-        0,
+        &gestor.tab().documento,
+        Some(&gestor.tab().nombre),
+        false, false, "", "", &[], 0, 0,
     );
 
-    let contenido_inicial = documento_a_contenido(
-        &documento,
-        &resaltador,
-        lenguaje,
-        &host,
-        &diagnosticos_compartidos.lock().unwrap(),
-        vec![],
-        None,
-        barra_inicial,
-        None,
-    );
+    let contenido_inicial = {
+        let diags = diagnosticos_compartidos.lock().unwrap();
+        documento_a_contenido(
+            &gestor.tab().documento,
+            &resaltador,
+            gestor.tab().lenguaje,
+            &host,
+            &diags,
+            vec![],
+            None,
+            barra_inicial,
+            None,
+            gestor.infos_tabs(),
+        )
+    };
 
-    let titulo = nombre_archivo
-        .as_ref()
-        .map(|n| format!("{n} — Glyph"))
-        .unwrap_or_else(|| "Sin título — Glyph".to_string());
+    let titulo = format!("{} — Glyph", gestor.tab().nombre);
 
     // Determinar configuración por tipo de archivo
     let ext = ruta_archivo
@@ -153,24 +256,6 @@ fn main() -> Result<()> {
         tamano_tab: cfg_lang.tamano_tab.unwrap_or(4),
     };
 
-    let uri_doc: Option<Url> = ruta_archivo
-        .as_ref()
-        .and_then(|r| r.canonicalize().ok())
-        .and_then(|r| Url::from_file_path(r).ok());
-
-    let ruta_str: Option<String> = ruta_archivo
-        .as_ref()
-        .and_then(|p| p.to_str())
-        .map(|s| s.to_string());
-
-    // ── Estado de búsqueda/reemplazo (vive en el closure del event loop) ──
-    let mut en_busqueda = false;
-    let mut en_reemplazo = false;
-    let mut consulta_actual = String::new();
-    let mut reemplazo_actual = String::new();
-    let mut matches_actuales: Vec<(usize, usize)> = Vec::new();
-    let mut match_activo: usize = 0;
-
     // ── Estado de hover (vive en el closure del event loop) ────────────
     let mut hover_actual: Option<String> = None;
 
@@ -178,6 +263,41 @@ fn main() -> Result<()> {
     let mut clipboard = Clipboard::new().ok();
 
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
+        // ── Eventos de navegación de tabs ─────────────────────────────────
+        match evento {
+            EventoEditor::NuevoTab => {
+                gestor.abrir_tab_vacio();
+                hover_actual = None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, None));
+            }
+            EventoEditor::CerrarTab => {
+                gestor.cerrar_activo();
+                hover_actual = None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, None));
+            }
+            EventoEditor::SiguienteTab => {
+                gestor.siguiente();
+                hover_actual = None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, None));
+            }
+            EventoEditor::AnteriorTab => {
+                gestor.anterior();
+                hover_actual = None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, None));
+            }
+            EventoEditor::ActivarTab(idx) => {
+                gestor.activar(idx);
+                hover_actual = None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, None));
+            }
+            _ => {}
+        }
+
         let modifica_texto = matches!(
             evento,
             EventoEditor::InsertarTexto(_)
@@ -206,76 +326,93 @@ fn main() -> Result<()> {
 
         match evento {
             EventoEditor::InsertarTexto(texto) => {
-                if let Err(e) = documento.insertar_en_cursor(&texto) {
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.insertar_en_cursor(&texto) {
                     tracing::error!("Error insertando texto: {e}");
                     return None;
                 }
-                // Actualizar matches si hay búsqueda activa
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                tab.modificado = true;
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
             EventoEditor::BorrarAtras => {
-                if let Err(e) = documento.borrar_antes_cursor() {
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.borrar_antes_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
                 }
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                tab.modificado = true;
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
             EventoEditor::BorrarAdelante => {
-                if let Err(e) = documento.borrar_despues_cursor() {
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.borrar_despues_cursor() {
                     tracing::error!("Error borrando: {e}");
                     return None;
                 }
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                tab.modificado = true;
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
-            EventoEditor::MoverCursor(direccion) => match direccion {
-                DireccionCursor::Izquierda => documento.mover_cursor_izquierda(),
-                DireccionCursor::Derecha => documento.mover_cursor_derecha(),
-                DireccionCursor::Arriba => documento.mover_cursor_arriba(),
-                DireccionCursor::Abajo => documento.mover_cursor_abajo(),
-                DireccionCursor::InicioLinea => documento.mover_cursor_inicio_linea(),
-                DireccionCursor::FinLinea => documento.mover_cursor_fin_linea(),
-                DireccionCursor::PaginaArriba => documento.mover_cursor_pagina_arriba(LINEAS_POR_PAGINA),
-                DireccionCursor::PaginaAbajo => documento.mover_cursor_pagina_abajo(LINEAS_POR_PAGINA),
-                DireccionCursor::InicioDoc => documento.mover_cursor_inicio_doc(),
-                DireccionCursor::FinDoc => documento.mover_cursor_fin_doc(),
-            },
+            EventoEditor::MoverCursor(direccion) => {
+                let doc = &mut gestor.tab_mut().documento;
+                match direccion {
+                    DireccionCursor::Izquierda   => doc.mover_cursor_izquierda(),
+                    DireccionCursor::Derecha      => doc.mover_cursor_derecha(),
+                    DireccionCursor::Arriba       => doc.mover_cursor_arriba(),
+                    DireccionCursor::Abajo        => doc.mover_cursor_abajo(),
+                    DireccionCursor::InicioLinea  => doc.mover_cursor_inicio_linea(),
+                    DireccionCursor::FinLinea     => doc.mover_cursor_fin_linea(),
+                    DireccionCursor::PaginaArriba => doc.mover_cursor_pagina_arriba(LINEAS_POR_PAGINA),
+                    DireccionCursor::PaginaAbajo  => doc.mover_cursor_pagina_abajo(LINEAS_POR_PAGINA),
+                    DireccionCursor::InicioDoc    => doc.mover_cursor_inicio_doc(),
+                    DireccionCursor::FinDoc       => doc.mover_cursor_fin_doc(),
+                }
+            }
             EventoEditor::Deshacer => {
-                if let Err(e) = documento.deshacer() {
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.deshacer() {
                     tracing::error!("Error al deshacer: {e}");
                     return None;
                 }
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
             EventoEditor::Rehacer => {
-                if let Err(e) = documento.rehacer() {
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.rehacer() {
                     tracing::error!("Error al rehacer: {e}");
                     return None;
                 }
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
             EventoEditor::Guardar => {
-                let ruta = documento.buffer.ruta.clone();
+                let tab = gestor.tab_mut();
+                let ruta = tab.documento.buffer.ruta.clone();
                 match ruta {
                     Some(ruta) => {
-                        let contenido = documento.buffer.contenido_completo();
+                        let contenido = tab.documento.buffer.contenido_completo();
                         match std::fs::write(&ruta, contenido.as_bytes()) {
                             Ok(()) => {
-                                documento.buffer.marcar_guardado();
+                                tab.documento.buffer.marcar_guardado();
+                                tab.modificado = false;
                                 tracing::info!("Guardado: {}", ruta.display());
                                 host.al_guardar(ruta.to_str());
                             }
@@ -284,153 +421,168 @@ fn main() -> Result<()> {
                     }
                     None => tracing::warn!("Sin ruta — abre un archivo con: glyph <archivo>"),
                 }
-                return None;
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
             }
 
             // ── Búsqueda ──────────────────────────────────────────────
             EventoEditor::IniciarBusqueda => {
-                en_busqueda = true;
-                consulta_actual.clear();
-                matches_actuales.clear();
-                match_activo = 0;
+                let tab = gestor.tab_mut();
+                tab.en_busqueda = true;
+                tab.consulta.clear();
+                tab.matches.clear();
+                tab.match_activo = 0;
             }
             EventoEditor::ActualizarBusqueda(consulta) => {
-                consulta_actual = consulta;
-                matches_actuales = documento.buscar(&consulta_actual);
-                match_activo = 0;
-                if let Some(&(ini, _)) = matches_actuales.first() {
-                    documento.mover_cursor_a_byte(ini);
+                let tab = gestor.tab_mut();
+                tab.consulta = consulta;
+                let q = tab.consulta.clone();
+                tab.matches = tab.documento.buscar(&q);
+                tab.match_activo = 0;
+                if let Some(&(ini, _)) = tab.matches.first() {
+                    tab.documento.mover_cursor_a_byte(ini);
                 }
             }
             EventoEditor::SiguienteMatch => {
-                if !matches_actuales.is_empty() {
-                    match_activo = (match_activo + 1) % matches_actuales.len();
-                    let (ini, _) = matches_actuales[match_activo];
-                    documento.mover_cursor_a_byte(ini);
+                let tab = gestor.tab_mut();
+                if !tab.matches.is_empty() {
+                    tab.match_activo = (tab.match_activo + 1) % tab.matches.len();
+                    let ini = tab.matches[tab.match_activo].0;
+                    tab.documento.mover_cursor_a_byte(ini);
                 }
             }
             EventoEditor::MatchAnterior => {
-                if !matches_actuales.is_empty() {
-                    match_activo = match_activo
-                        .checked_sub(1)
-                        .unwrap_or(matches_actuales.len() - 1);
-                    let (ini, _) = matches_actuales[match_activo];
-                    documento.mover_cursor_a_byte(ini);
+                let tab = gestor.tab_mut();
+                if !tab.matches.is_empty() {
+                    tab.match_activo = tab.match_activo
+                        .checked_sub(1).unwrap_or(tab.matches.len() - 1);
+                    let ini = tab.matches[tab.match_activo].0;
+                    tab.documento.mover_cursor_a_byte(ini);
                 }
             }
             EventoEditor::TerminarBusqueda => {
-                en_busqueda = false;
-                en_reemplazo = false;
-                consulta_actual.clear();
-                reemplazo_actual.clear();
-                matches_actuales.clear();
-                match_activo = 0;
+                let tab = gestor.tab_mut();
+                tab.en_busqueda = false;
+                tab.en_reemplazo = false;
+                tab.consulta.clear();
+                tab.reemplazo_str.clear();
+                tab.matches.clear();
+                tab.match_activo = 0;
             }
 
             // ── Reemplazo ─────────────────────────────────────────────
             EventoEditor::IniciarReemplazo => {
-                en_busqueda = true;
-                en_reemplazo = true;
-                consulta_actual.clear();
-                reemplazo_actual.clear();
-                matches_actuales.clear();
-                match_activo = 0;
+                let tab = gestor.tab_mut();
+                tab.en_busqueda = true;
+                tab.en_reemplazo = true;
+                tab.consulta.clear();
+                tab.reemplazo_str.clear();
+                tab.matches.clear();
+                tab.match_activo = 0;
             }
             EventoEditor::ActualizarReemplazo(texto) => {
-                reemplazo_actual = texto;
+                gestor.tab_mut().reemplazo_str = texto;
             }
             EventoEditor::ReemplazarMatch => {
-                if !matches_actuales.is_empty() {
-                    let (ini, fin) = matches_actuales[match_activo];
-                    if let Err(e) = documento.reemplazar_bytes(ini, fin, &reemplazo_actual) {
+                let tab = gestor.tab_mut();
+                if !tab.matches.is_empty() {
+                    let (ini, fin) = tab.matches[tab.match_activo];
+                    let reemplazo = tab.reemplazo_str.clone();
+                    if let Err(e) = tab.documento.reemplazar_bytes(ini, fin, &reemplazo) {
                         tracing::error!("Error reemplazando match: {e}");
                     }
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
-                    if let Some(&(ini, _)) = matches_actuales.get(match_activo) {
-                        documento.mover_cursor_a_byte(ini);
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
+                    if let Some(&(i, _)) = tab.matches.get(tab.match_activo) {
+                        tab.documento.mover_cursor_a_byte(i);
                     }
+                    tab.modificado = true;
                 }
             }
             EventoEditor::ReemplazarTodo => {
-                if !matches_actuales.is_empty() {
-                    if let Err(e) = documento.reemplazar_todo_bytes(&matches_actuales.clone(), &reemplazo_actual) {
+                let tab = gestor.tab_mut();
+                if !tab.matches.is_empty() {
+                    let reemplazo = tab.reemplazo_str.clone();
+                    if let Err(e) = tab.documento.reemplazar_todo_bytes(&tab.matches.clone(), &reemplazo) {
                         tracing::error!("Error en reemplazar todo: {e}");
                     }
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = 0;
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = 0;
+                    tab.modificado = true;
                 }
             }
 
             // ── Click de ratón ────────────────────────────────────────
             EventoEditor::MoverCursorA { linea, columna } => {
-                documento.mover_cursor_a(linea as usize, columna as usize);
+                gestor.tab_mut().documento.mover_cursor_a(linea as usize, columna as usize);
             }
 
             // ── Selección y clipboard ─────────────────────────────────
             EventoEditor::SeleccionarTodo => {
-                documento.seleccionar_todo();
+                gestor.tab_mut().documento.seleccionar_todo();
             }
             EventoEditor::ExtenderSeleccion(dir) => {
+                let doc = &mut gestor.tab_mut().documento;
                 match dir {
-                    DireccionCursor::Izquierda   => documento.mover_cursor_izquierda_sel(),
-                    DireccionCursor::Derecha      => documento.mover_cursor_derecha_sel(),
-                    DireccionCursor::Arriba       => documento.mover_cursor_arriba_sel(),
-                    DireccionCursor::Abajo        => documento.mover_cursor_abajo_sel(),
-                    DireccionCursor::InicioLinea  => documento.mover_cursor_inicio_linea_sel(),
-                    DireccionCursor::FinLinea     => documento.mover_cursor_fin_linea_sel(),
-                    // PaginaArriba/Abajo/InicioDoc/FinDoc no extienden selección
+                    DireccionCursor::Izquierda  => doc.mover_cursor_izquierda_sel(),
+                    DireccionCursor::Derecha     => doc.mover_cursor_derecha_sel(),
+                    DireccionCursor::Arriba      => doc.mover_cursor_arriba_sel(),
+                    DireccionCursor::Abajo       => doc.mover_cursor_abajo_sel(),
+                    DireccionCursor::InicioLinea => doc.mover_cursor_inicio_linea_sel(),
+                    DireccionCursor::FinLinea    => doc.mover_cursor_fin_linea_sel(),
                     _ => {}
                 }
             }
             EventoEditor::Copiar => {
-                if let Some(texto) = documento.texto_seleccionado() {
+                if let Some(texto) = gestor.tab().documento.texto_seleccionado() {
                     if let Some(cb) = &mut clipboard {
-                        if let Err(e) = cb.set_text(&texto) {
-                            tracing::warn!("Error al copiar al portapapeles: {e}");
-                        }
+                        let _ = cb.set_text(&texto);
                     }
                 }
-                return None; // no cambia el documento
+                return None;
             }
             EventoEditor::Cortar => {
-                if let Some(texto) = documento.texto_seleccionado() {
+                let texto = gestor.tab().documento.texto_seleccionado();
+                if let Some(texto) = texto {
                     if let Some(cb) = &mut clipboard {
-                        if let Err(e) = cb.set_text(&texto) {
-                            tracing::warn!("Error al cortar al portapapeles: {e}");
-                        }
+                        let _ = cb.set_text(&texto);
                     }
-                    documento.borrar_seleccion();
-                    if en_busqueda {
-                        matches_actuales = documento.buscar(&consulta_actual);
-                        match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                    let tab = gestor.tab_mut();
+                    tab.documento.borrar_seleccion();
+                    tab.modificado = true;
+                    if tab.en_busqueda {
+                        let consulta = tab.consulta.clone();
+                        tab.matches = tab.documento.buscar(&consulta);
+                        tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                     }
                 } else {
                     return None;
                 }
             }
             EventoEditor::Pegar => {
-                let texto_pegado = clipboard
-                    .as_mut()
+                let texto_pegado = clipboard.as_mut()
                     .and_then(|cb| cb.get_text().ok())
                     .unwrap_or_default();
-                if texto_pegado.is_empty() {
-                    return None;
-                }
-                if let Err(e) = documento.insertar_en_cursor(&texto_pegado) {
+                if texto_pegado.is_empty() { return None; }
+                let tab = gestor.tab_mut();
+                if let Err(e) = tab.documento.insertar_en_cursor(&texto_pegado) {
                     tracing::error!("Error pegando texto: {e}");
                     return None;
                 }
-                if en_busqueda {
-                    matches_actuales = documento.buscar(&consulta_actual);
-                    match_activo = match_activo.min(matches_actuales.len().saturating_sub(1));
+                tab.modificado = true;
+                if tab.en_busqueda {
+                    let consulta = tab.consulta.clone();
+                    tab.matches = tab.documento.buscar(&consulta);
+                    tab.match_activo = tab.match_activo.min(tab.matches.len().saturating_sub(1));
                 }
             }
 
             // ── Hover LSP (Ctrl+K) ────────────────────────────────────
             EventoEditor::PedirHover => {
-                if let Some(ref uri) = uri_doc {
-                    let pos = documento.cursor_principal().posicion;
+                if let Some(ref uri) = gestor.tab().uri {
+                    let pos = gestor.tab().documento.cursor_principal().posicion;
                     let position = Position {
                         line: pos.linea as u32,
                         character: pos.columna as u32,
@@ -439,62 +591,29 @@ fn main() -> Result<()> {
                     if tx_hover_req.send((uri.clone(), position, tx_resp)).is_ok() {
                         hover_actual = rx_resp
                             .recv_timeout(Duration::from_millis(350))
-                            .ok()
-                            .flatten();
-                    } else {
-                        tracing::debug!("LSP no disponible para hover");
+                            .ok().flatten();
                     }
                 }
             }
+
+            // Tab events already handled above
+            _ => {}
         }
 
         // Notificar cambio al LSP y al plugin host
         if modifica_texto {
-            if let Some(ref uri) = uri_doc {
+            if let Some(ref uri) = gestor.tab().uri {
                 let version = version_doc.fetch_add(1, Ordering::Relaxed);
-                let texto = documento.buffer.contenido_completo();
+                let texto = gestor.tab().documento.buffer.contenido_completo();
                 let _ = tx_lsp.send((uri.clone(), texto, version));
+                let ruta_str = gestor.tab().ruta.as_ref()
+                    .and_then(|p| p.to_str()).map(|s| s.to_string());
                 host.al_cambiar(ruta_str.as_deref(), version as u32);
             }
         }
 
-        let n_errores = {
-            let diags = diagnosticos_compartidos.lock().unwrap();
-            diags.iter().filter(|d| d.severity == Some(DiagnosticSeverity::ERROR)).count()
-        };
-
-        let barra = construir_barra_estado(
-            &documento,
-            nombre_archivo.as_deref(),
-            en_busqueda,
-            en_reemplazo,
-            &consulta_actual,
-            &reemplazo_actual,
-            &matches_actuales,
-            match_activo,
-            n_errores,
-        );
-
-        let (m_busqueda, m_activo) = if en_busqueda && !matches_actuales.is_empty() {
-            (matches_actuales.clone(), Some(match_activo))
-        } else if en_busqueda {
-            (vec![], None)
-        } else {
-            (vec![], None)
-        };
-
-        let diags = diagnosticos_compartidos.lock().unwrap();
-        Some(documento_a_contenido(
-            &documento,
-            &resaltador,
-            lenguaje,
-            &host,
-            &diags,
-            m_busqueda,
-            m_activo,
-            barra,
-            hover_actual.clone(),
-        ))
+        Some(construir_contenido(&gestor, &resaltador, &host,
+            &diagnosticos_compartidos, hover_actual.clone()))
     })
 }
 
@@ -574,6 +693,48 @@ fn registrar_diagnosticos(diags: &[Diagnostic]) {
 // Conversión Document → ContenidoRender
 // ------------------------------------------------------------------
 
+fn construir_contenido(
+    gestor: &GestorTabs,
+    resaltador: &Resaltador,
+    host: &HostPlugins,
+    diagnosticos: &Arc<Mutex<Vec<Diagnostic>>>,
+    hover: Option<String>,
+) -> ContenidoRender {
+    let tab = gestor.tab();
+    let diags = diagnosticos.lock().unwrap();
+    let n_errores = diags.iter()
+        .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .count();
+    let barra = construir_barra_estado(
+        &tab.documento,
+        Some(&tab.nombre),
+        tab.en_busqueda,
+        tab.en_reemplazo,
+        &tab.consulta,
+        &tab.reemplazo_str,
+        &tab.matches,
+        tab.match_activo,
+        n_errores,
+    );
+    let (m_busqueda, m_activo) = if tab.en_busqueda && !tab.matches.is_empty() {
+        (tab.matches.clone(), Some(tab.match_activo))
+    } else {
+        (vec![], None)
+    };
+    documento_a_contenido(
+        &tab.documento,
+        resaltador,
+        tab.lenguaje,
+        host,
+        &diags,
+        m_busqueda,
+        m_activo,
+        barra,
+        hover,
+        gestor.infos_tabs(),
+    )
+}
+
 fn documento_a_contenido(
     doc: &Document,
     resaltador: &Resaltador,
@@ -584,6 +745,7 @@ fn documento_a_contenido(
     match_activo: Option<usize>,
     barra_estado: String,
     hover_texto: Option<String>,
+    tabs: Vec<TabInfo>,
 ) -> ContenidoRender {
     let cursor = doc.cursor_principal();
     let texto_completo = doc.buffer.contenido_completo();
@@ -642,6 +804,7 @@ fn documento_a_contenido(
         barra_estado,
         hover_texto,
         seleccion_bytes: doc.seleccion_bytes(),
+        tabs,
     }
 }
 
@@ -731,14 +894,6 @@ fn tipo_a_color(tipo: TipoResaltado, host: &HostPlugins) -> ColorRender {
 // ------------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------------
-
-fn lenguaje_del_doc(ruta: &Option<PathBuf>) -> Lenguaje {
-    ruta.as_ref()
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
-        .map(Lenguaje::desde_extension)
-        .unwrap_or(Lenguaje::Desconocido)
-}
 
 /// Convierte una posición LSP (línea, carácter UTF-16) a byte offset
 /// en el string `lineas.join("\n")`.

@@ -50,6 +50,11 @@ const COLOR_GUTTER_ACTIVO: Color = Color::rgb(0xF0, 0xAA, 0xAC);// #F0AAAC núme
 const COLOR_HOVER: Color = Color::rgb(0xFF, 0xFF, 0xFF);         // blanco hover
 
 const ALTURA_BARRA: f32 = 22.0;
+const ALTURA_TABS: f32 = 32.0;
+
+const COLOR_TAB_ACTIVO: Color = Color::rgb(0xFF, 0xFF, 0xFF);   // blanco — tab visible
+const COLOR_TAB_INACTIVO: Color = Color::rgb(0x57, 0x6A, 0x8F); // azul muted — tab inactivo
+const COLOR_TAB_PUNTO: Color = Color::rgb(0xF0, 0xAA, 0xAC);    // rosa — punto de modificado
 const MARGEN_SCROLL: i32 = 3;
 // Fracción del tamaño de fuente que ocupa un carácter monoespaciado en anchura
 const RATIO_CHAR: f32 = 0.601;
@@ -86,6 +91,11 @@ pub struct RendererTexto {
     hover_pos_px: (f32, f32),
     /// Posición del cursor en el frame anterior — para detectar si se movió
     cursor_anterior: Option<CursorRender>,
+    /// Buffer de texto para la barra de tabs superior
+    buffer_tabs: Buffer,
+    metricas_tabs: Metrics,
+    /// Límites X de cada tab (inicio, fin) para detección de clicks
+    tabs_limites: Vec<(f32, f32)>,
 }
 
 impl RendererTexto {
@@ -110,6 +120,10 @@ impl RendererTexto {
             wgpu::MultisampleState::default(),
             None,
         );
+
+        let metricas_tabs = Metrics::new(13.0, ALTURA_TABS);
+        let mut buffer_tabs = Buffer::new(&mut sistema_fuentes, metricas_tabs);
+        buffer_tabs.set_size(&mut sistema_fuentes, 1280.0, ALTURA_TABS);
 
         let metricas = Metrics::new(tamano_fuente, tamano_fuente * multiplicador_linea);
         let mut buffer = Buffer::new(&mut sistema_fuentes, metricas);
@@ -143,7 +157,18 @@ impl RendererTexto {
             hover_activo: false,
             hover_pos_px: (0.0, 0.0),
             cursor_anterior: None,
+            buffer_tabs,
+            metricas_tabs,
+            tabs_limites: Vec::new(),
         }
+    }
+
+    /// Devuelve la altura en píxeles de la barra de tabs.
+    pub fn altura_tabs(&self) -> f32 { ALTURA_TABS }
+
+    /// Devuelve el índice del tab sobre el que está la coordenada X, o None.
+    pub fn tab_en_posicion(&self, x: f32) -> Option<usize> {
+        self.tabs_limites.iter().position(|&(x0, x1)| x >= x0 && x < x1)
     }
 
     /// Ajusta el scroll manualmente (rueda del ratón).
@@ -154,7 +179,41 @@ impl RendererTexto {
 
     /// Actualiza los buffers de texto con el contenido del frame.
     pub fn actualizar_contenido(&mut self, contenido: &ContenidoRender, ancho: f32, alto: f32) {
-        let alto_editor = (alto - ALTURA_BARRA).max(1.0);
+        let alto_editor = (alto - ALTURA_BARRA - ALTURA_TABS).max(1.0);
+
+        // — Barra de tabs ──────────────────────────────────────────────────
+        self.tabs_limites.clear();
+        let char_w_tab = self.metricas_tabs.font_size * RATIO_CHAR;
+        let mut tab_x = 0.0f32;
+        let tab_frags: Vec<(String, Attrs<'static>)> = contenido.tabs.iter()
+            .flat_map(|tab| {
+                let color = if tab.activo { COLOR_TAB_ACTIVO } else { COLOR_TAB_INACTIVO };
+                let base = Attrs::new().family(Family::Monospace);
+                if tab.modificado {
+                    let prefijo = format!("  ● ");
+                    let sufijo = format!("{}  ", tab.nombre);
+                    let ancho = (prefijo.chars().count() + sufijo.chars().count()) as f32 * char_w_tab;
+                    self.tabs_limites.push((tab_x, tab_x + ancho));
+                    tab_x += ancho;
+                    vec![
+                        (prefijo, base.color(COLOR_TAB_PUNTO)),
+                        (sufijo, base.color(color)),
+                    ]
+                } else {
+                    let texto_tab = format!("  {}  ", tab.nombre);
+                    let ancho = texto_tab.chars().count() as f32 * char_w_tab;
+                    self.tabs_limites.push((tab_x, tab_x + ancho));
+                    tab_x += ancho;
+                    vec![(texto_tab, base.color(color))]
+                }
+            })
+            .collect();
+        let frags_refs: Vec<(&str, Attrs)> =
+            tab_frags.iter().map(|(s, a)| (s.as_str(), *a)).collect();
+        self.buffer_tabs.set_metrics(&mut self.sistema_fuentes, self.metricas_tabs);
+        self.buffer_tabs.set_size(&mut self.sistema_fuentes, ancho, ALTURA_TABS);
+        self.buffer_tabs.set_rich_text(&mut self.sistema_fuentes, frags_refs, Shaping::Advanced);
+        self.buffer_tabs.shape_until_scroll(&mut self.sistema_fuentes);
 
         // — Scroll tracking: solo activa cuando el cursor se mueve ──────────
         let cursor_movio = contenido.cursor != self.cursor_anterior;
@@ -305,6 +364,7 @@ impl RendererTexto {
     ) -> Result<()> {
         self.atlas.trim();
 
+        let tabs_top = ALTURA_TABS as i32;
         let alto_editor = (alto as i32) - ALTURA_BARRA as i32;
         let gutter_ancho_i = self.ancho_gutter as i32;
         let texto_left = self.ancho_gutter;
@@ -317,6 +377,7 @@ impl RendererTexto {
             buffer_barra,
             buffer_gutter,
             buffer_hover,
+            buffer_tabs,
             cache_formas,
             hover_activo,
             hover_pos_px,
@@ -325,29 +386,43 @@ impl RendererTexto {
         } = self;
 
         let mut areas: Vec<TextArea> = vec![
-            // 1. Gutter de números de línea
+            // 1. Barra de tabs
             TextArea {
-                buffer: buffer_gutter,
-                left: 4.0,
-                top: 8.0,
+                buffer: buffer_tabs,
+                left: 0.0,
+                top: 0.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: 0,
                     top: 0,
+                    right: ancho as i32,
+                    bottom: tabs_top,
+                },
+                default_color: COLOR_TAB_INACTIVO,
+            },
+            // 2. Gutter de números de línea
+            TextArea {
+                buffer: buffer_gutter,
+                left: 4.0,
+                top: ALTURA_TABS + 8.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: tabs_top,
                     right: gutter_ancho_i,
                     bottom: alto_editor,
                 },
                 default_color: COLOR_GUTTER,
             },
-            // 2. Editor de texto
+            // 3. Editor de texto
             TextArea {
                 buffer,
                 left: texto_left + 4.0,
-                top: 8.0,
+                top: ALTURA_TABS + 8.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: gutter_ancho_i,
-                    top: 0,
+                    top: tabs_top,
                     right: ancho as i32,
                     bottom: alto_editor,
                 },

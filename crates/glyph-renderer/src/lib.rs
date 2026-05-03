@@ -30,6 +30,7 @@ mod texto;
 pub use configuracion::ConfigRenderer;
 pub use contenido::{
     ColorRender, ContenidoRender, CursorRender, DiagnosticoRender, SeveridadRender, SpanTexto,
+    TabInfo,
 };
 pub use eventos::{DireccionCursor, EventoEditor};
 pub use renderer::Renderer;

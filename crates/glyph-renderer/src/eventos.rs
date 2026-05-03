@@ -95,4 +95,19 @@ pub enum EventoEditor {
 
     /// Pegar texto desde el portapapeles (Ctrl+V)
     Pegar,
+
+    /// Abrir un nuevo tab vacío (Ctrl+T)
+    NuevoTab,
+
+    /// Cerrar el tab activo (Ctrl+W)
+    CerrarTab,
+
+    /// Activar el tab siguiente (Ctrl+Tab)
+    SiguienteTab,
+
+    /// Activar el tab anterior (Ctrl+Shift+Tab)
+    AnteriorTab,
+
+    /// Activar un tab concreto por índice (click en la barra de tabs)
+    ActivarTab(usize),
 }

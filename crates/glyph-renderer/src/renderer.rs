@@ -170,26 +170,37 @@ impl Renderer {
                             }
                         }
 
-                        // ── Click izquierdo → mover cursor ────────────────
+                        // ── Click izquierdo → tabs o cursor ───────────────
                         WindowEvent::MouseInput {
                             state: ElementState::Pressed,
                             button: MouseButton::Left,
                             ..
                         } if modo == ModoRenderer::Normal => {
-                            let gutter = texto.ancho_gutter();
-                            let scroll = texto.scroll_linea();
-                            let tx = pos_raton.0 - gutter - 4.0;
-                            let ty = pos_raton.1 - 8.0;
-                            if tx >= 0.0 && ty >= 0.0 {
-                                let linea = (ty / linea_alto) as i32 + scroll;
-                                let col = (tx / char_ancho) as u32;
-                                let ev = EventoEditor::MoverCursorA {
-                                    linea: linea.max(0) as u32,
-                                    columna: col,
-                                };
-                                if let Some(nuevo) = manejador(ev) {
-                                    contenido = nuevo;
-                                    window.request_redraw();
+                            let (mx, my) = pos_raton;
+                            if my < texto.altura_tabs() {
+                                // Click en la barra de tabs
+                                if let Some(idx) = texto.tab_en_posicion(mx) {
+                                    if let Some(nuevo) = manejador(EventoEditor::ActivarTab(idx)) {
+                                        contenido = nuevo;
+                                        window.request_redraw();
+                                    }
+                                }
+                            } else {
+                                let gutter = texto.ancho_gutter();
+                                let scroll = texto.scroll_linea();
+                                let tx = mx - gutter - 4.0;
+                                let ty = my - texto.altura_tabs() - 8.0;
+                                if tx >= 0.0 && ty >= 0.0 {
+                                    let linea = (ty / linea_alto) as i32 + scroll;
+                                    let col = (tx / char_ancho) as u32;
+                                    let ev = EventoEditor::MoverCursorA {
+                                        linea: linea.max(0) as u32,
+                                        columna: col,
+                                    };
+                                    if let Some(nuevo) = manejador(ev) {
+                                        contenido = nuevo;
+                                        window.request_redraw();
+                                    }
                                 }
                             }
                         }
@@ -369,8 +380,17 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
                 "c" | "C" => Some(EventoEditor::Copiar),
                 "v" | "V" => Some(EventoEditor::Pegar),
                 "x" | "X" => Some(EventoEditor::Cortar),
+                "t" | "T" => Some(EventoEditor::NuevoTab),
+                "w" | "W" => Some(EventoEditor::CerrarTab),
                 _ => None,
             },
+            Key::Named(NamedKey::Tab) => {
+                return if mods.shift_key() {
+                    Some(EventoEditor::AnteriorTab)
+                } else {
+                    Some(EventoEditor::SiguienteTab)
+                };
+            }
             Key::Named(NamedKey::Home) => {
                 Some(EventoEditor::MoverCursor(DireccionCursor::InicioDoc))
             }
