@@ -84,6 +84,7 @@ pub struct RendererTexto {
     metricas: Metrics,
     metricas_barra: Metrics,
     scroll_linea: i32,
+    sidebar_scroll_linea: i32,
     ancho_gutter: f32,
     /// true cuando hay hover activo que debe dibujarse
     hover_activo: bool,
@@ -162,6 +163,7 @@ impl RendererTexto {
             metricas,
             metricas_barra,
             scroll_linea: 0,
+            sidebar_scroll_linea: 0,
             ancho_gutter: 48.0,
             hover_activo: false,
             hover_pos_px: (0.0, 0.0),
@@ -187,6 +189,10 @@ impl RendererTexto {
     /// El cursor tracking no anulará este ajuste mientras el cursor no se mueva.
     pub fn ajustar_scroll(&mut self, delta: i32) {
         self.scroll_linea = (self.scroll_linea + delta).max(0);
+    }
+
+    pub fn ajustar_scroll_sidebar(&mut self, delta: i32) {
+        self.sidebar_scroll_linea = (self.sidebar_scroll_linea + delta).max(0);
     }
 
     /// Actualiza los buffers de texto con el contenido del frame.
@@ -306,6 +312,7 @@ impl RendererTexto {
             buffer_sidebar.set_size(sistema_fuentes, sidebar_ancho_px - 8.0, alto_editor);
             let refs: Vec<(&str, Attrs)> = frags.iter().map(|(s, a)| (s.as_str(), *a)).collect();
             buffer_sidebar.set_rich_text(sistema_fuentes, refs, Shaping::Advanced);
+            buffer_sidebar.set_scroll(self.sidebar_scroll_linea);
             buffer_sidebar.shape_until_scroll(sistema_fuentes);
         }
 

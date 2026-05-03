@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use glyph_plugin_api::{
-    AccionPlugin, ContextoPlugin, LineaSeccion, Permisos, Plugin, SeccionConfig,
+    AccionPlugin, ContextoPlugin, LineaSeccion, NivelNotificacion, Permisos, Plugin, SeccionConfig,
 };
 
 pub(crate) struct PluginLua {
@@ -257,6 +257,18 @@ fn inyectar_global_glyph(lua: &Lua) -> anyhow::Result<()> {
     })?;
     glyph.set("leer_directorio", leer_dir_fn)?;
 
+    // glyph.mostrar_notificacion(mensaje, nivel)
+    let notificar_fn = lua.create_function(|lua_ctx, (mensaje, nivel): (String, String)| {
+        let pending: Table = lua_ctx.globals().get("_glyph_pending")?;
+        let accion = lua_ctx.create_table()?;
+        accion.set("tipo", "mostrar_notificacion")?;
+        accion.set("mensaje", mensaje)?;
+        accion.set("nivel", nivel)?;
+        pending.push(accion)?;
+        Ok(())
+    })?;
+    glyph.set("mostrar_notificacion", notificar_fn)?;
+
     globals.set("glyph", glyph)?;
     Ok(())
 }
@@ -316,6 +328,16 @@ fn drenar_pending(lua: &Lua, nombre_plugin: &str) -> Vec<AccionPlugin> {
                 };
                 let lineas = tabla_a_lineas(lineas_tabla, nombre_plugin);
                 acciones.push(AccionPlugin::ActualizarContenidoSeccion { id, lineas });
+            }
+            "mostrar_notificacion" => {
+                let mensaje: String = item.get("mensaje").unwrap_or_default();
+                let nivel_str: String = item.get("nivel").unwrap_or_else(|_| "info".into());
+                let nivel = match nivel_str.to_lowercase().as_str() {
+                    "aviso" | "warning" => NivelNotificacion::Aviso,
+                    "error" => NivelNotificacion::Error,
+                    _ => NivelNotificacion::Info,
+                };
+                acciones.push(AccionPlugin::MostrarNotificacion { mensaje, nivel });
             }
             _ => {
                 tracing::warn!("[plugin '{nombre_plugin}'] acción Lua desconocida: '{tipo}'");

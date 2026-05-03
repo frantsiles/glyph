@@ -45,7 +45,7 @@ use winit::{
     event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::WindowBuilder,
+    window::{CursorIcon, WindowBuilder},
 };
 
 use crate::{
@@ -53,7 +53,7 @@ use crate::{
     contenido::ContenidoRender,
     eventos::{DireccionCursor, EventoEditor},
     gpu::ContextoGpu,
-    quads::{ColorRgba, QuadRenderer},
+    quads::{ColorRgba, QuadRenderer, RectPx},
     seccion::{LadoLayout, LayoutManager, SeccionUI, TamanoPref},
     texto::RendererTexto,
 };
@@ -73,6 +73,8 @@ enum CampoReemplazo {
 
 // Color del fondo de la sidebar: ligeramente más oscuro que el editor
 const COLOR_SIDEBAR_FONDO: ColorRgba = ColorRgba { r: 0.098, g: 0.098, b: 0.153, a: 1.0 };
+const COLOR_SIDEBAR_DIVIDER: ColorRgba = ColorRgba { r: 0.52, g: 0.56, b: 0.74, a: 0.9 };
+const COLOR_SIDEBAR_HANDLE: ColorRgba = ColorRgba { r: 0.72, g: 0.76, b: 0.96, a: 0.75 };
 // Color de la barra de tabs
 const COLOR_TABS_FONDO: ColorRgba = ColorRgba { r: 0.078, g: 0.078, b: 0.122, a: 1.0 };
 // Color de la statusbar
@@ -155,6 +157,8 @@ impl Renderer {
         let mut reemplazo = String::new();
         let mut campo = CampoReemplazo::Buscar;
         let mut pos_raton = (0.0f32, 0.0f32);
+        let mut sidebar_resizing = false;
+        let mut sidebar_ancho = ANCHO_SIDEBAR_PX;
 
         window.request_redraw();
 
@@ -184,6 +188,43 @@ impl Renderer {
                         // ── Posición del ratón ────────────────────────────
                         WindowEvent::CursorMoved { position, .. } => {
                             pos_raton = (position.x as f32, position.y as f32);
+                            if sidebar_resizing {
+                                let (mx, _) = pos_raton;
+                                if let Some(rect) = layout.rect_seccion("sidebar") {
+                                    let nuevo_ancho = (mx - rect.x).clamp(120.0, 560.0);
+                                    sidebar_ancho = nuevo_ancho;
+                                    if let Some(sec) = layout.secciones().iter().find(|s| s.id == "sidebar").cloned() {
+                                        layout.registrar(SeccionUI {
+                                            id: sec.id.clone(),
+                                            lado: sec.lado.clone(),
+                                            tamano_pref: TamanoPref::Fijo(sidebar_ancho),
+                                            visible: sec.visible,
+                                            z_order: sec.z_order,
+                                            color_fondo: sec.color_fondo,
+                                        });
+                                    }
+                                    window.request_redraw();
+                                }
+                            } else {
+                                // Cambiar cursor si está sobre el borde de redimensionamiento
+                                let (mx, my) = pos_raton;
+                                let ancho = gpu.config_superficie.width as f32;
+                                let alto = gpu.config_superficie.height as f32;
+                                let _ = layout.calcular(ancho, alto);
+                                let mut cursor_resize = false;
+                                if let Some(rect) = layout.rect_seccion("sidebar").copied() {
+                                    let borde_izq = rect.x + rect.ancho - 8.0;
+                                    let borde_der = rect.x + rect.ancho + 2.0;
+                                    if mx >= borde_izq && mx <= borde_der && my >= rect.y && my <= rect.y + rect.alto {
+                                        cursor_resize = true;
+                                    }
+                                }
+                                if cursor_resize {
+                                    window.set_cursor_icon(CursorIcon::EwResize);
+                                } else {
+                                    window.set_cursor_icon(CursorIcon::Default);
+                                }
+                            }
                         }
 
                         // ── Rueda del ratón → scroll ──────────────────────
@@ -199,7 +240,18 @@ impl Renderer {
                                 }
                             };
                             if lineas != 0 {
-                                texto.ajustar_scroll(lineas);
+                                let ancho = gpu.config_superficie.width as f32;
+                                let alto = gpu.config_superficie.height as f32;
+                                let _ = layout.calcular(ancho, alto);
+                                if let Some(id) = layout.seccion_en_posicion(pos_raton.0, pos_raton.1).cloned() {
+                                    if id == "sidebar" {
+                                        texto.ajustar_scroll_sidebar(lineas);
+                                    } else {
+                                        texto.ajustar_scroll(lineas);
+                                    }
+                                } else {
+                                    texto.ajustar_scroll(lineas);
+                                }
                                 window.request_redraw();
                             }
                         }
@@ -218,51 +270,71 @@ impl Renderer {
                             let soluciones = layout.calcular(ancho, alto);
                             let _ = soluciones; // calcular actualiza el estado interno
 
-                            if let Some(id) = layout.seccion_en_posicion(mx, my).cloned() {
-                                if id == "tabs" {
-                                    // Click en la barra de tabs
-                                    if let Some(idx) = texto.tab_en_posicion(mx) {
-                                        if let Some(nuevo) = manejador(EventoEditor::ActivarTab(idx)) {
-                                            contenido = nuevo;
-                                            window.request_redraw();
+                            let mut atajo_redimension = false;
+                            if let Some(rect) = layout.rect_seccion("sidebar").copied() {
+                                let borde_izq = rect.x + rect.ancho - 8.0;
+                                let borde_der = rect.x + rect.ancho + 2.0;
+                                if mx >= borde_izq && mx <= borde_der && my >= rect.y && my <= rect.y + rect.alto {
+                                    sidebar_resizing = true;
+                                    atajo_redimension = true;
+                                }
+                            }
+
+                            if !atajo_redimension {
+                                if let Some(id) = layout.seccion_en_posicion(mx, my).cloned() {
+                                    if id == "tabs" {
+                                        // Click en la barra de tabs
+                                        if let Some(idx) = texto.tab_en_posicion(mx) {
+                                            if let Some(nuevo) = manejador(EventoEditor::ActivarTab(idx)) {
+                                                contenido = nuevo;
+                                                window.request_redraw();
+                                            }
                                         }
-                                    }
-                                } else if id == "editor_area" {
-                                    // Click en el área del editor (gutter + editor)
-                                    let sidebar_ancho = sidebar_ancho_actual(&layout);
-                                    let gutter = texto.ancho_gutter();
-                                    let scroll = texto.scroll_linea();
-                                    let char_ancho = config.tamano_fuente * 0.601;
-                                    let tx = mx - sidebar_ancho - gutter - 4.0;
-                                    let ty = my - texto.altura_tabs() - 8.0;
-                                    if tx >= 0.0 && ty >= 0.0 {
-                                        let linea = (ty / linea_alto) as i32 + scroll;
-                                        let col = (tx / char_ancho) as u32;
-                                        let ev = EventoEditor::MoverCursorA {
-                                            linea: linea.max(0) as u32,
-                                            columna: col,
-                                        };
-                                        if let Some(nuevo) = manejador(ev) {
-                                            contenido = nuevo;
-                                            window.request_redraw();
+                                    } else if id == "editor_area" {
+                                        // Click en el área del editor (gutter + editor)
+                                        let sidebar_ancho = sidebar_ancho_actual(&layout);
+                                        let gutter = texto.ancho_gutter();
+                                        let scroll = texto.scroll_linea();
+                                        let char_ancho = config.tamano_fuente * 0.601;
+                                        let tx = mx - sidebar_ancho - gutter - 4.0;
+                                        let ty = my - texto.altura_tabs() - 8.0;
+                                        if tx >= 0.0 && ty >= 0.0 {
+                                            let linea = (ty / linea_alto) as i32 + scroll;
+                                            let col = (tx / char_ancho) as u32;
+                                            let ev = EventoEditor::MoverCursorA {
+                                                linea: linea.max(0) as u32,
+                                                columna: col,
+                                            };
+                                            if let Some(nuevo) = manejador(ev) {
+                                                contenido = nuevo;
+                                                window.request_redraw();
+                                            }
                                         }
-                                    }
-                                } else {
-                                    // Click en una sección de plugin
-                                    if let Some(rect) = layout.rect_seccion(&id).copied() {
-                                        let y_rel = my - rect.y;
-                                        let linea = (y_rel / linea_alto) as u32;
-                                        let ev = EventoEditor::EventoSeccion {
-                                            id_seccion: id,
-                                            linea,
-                                        };
-                                        if let Some(nuevo) = manejador(ev) {
-                                            contenido = nuevo;
-                                            window.request_redraw();
+                                    } else {
+                                        // Click en una sección de plugin
+                                        if let Some(rect) = layout.rect_seccion(&id).copied() {
+                                            let y_rel = my - rect.y;
+                                            let linea = (y_rel / linea_alto) as u32;
+                                            let ev = EventoEditor::EventoSeccion {
+                                                id_seccion: id,
+                                                linea,
+                                            };
+                                            if let Some(nuevo) = manejador(ev) {
+                                                contenido = nuevo;
+                                                window.request_redraw();
+                                            }
                                         }
                                     }
                                 }
                             }
+                        }
+
+                        WindowEvent::MouseInput {
+                            state: ElementState::Released,
+                            button: MouseButton::Left,
+                            ..
+                        } if modo == ModoRenderer::Normal => {
+                            sidebar_resizing = false;
                         }
 
                         // ── Teclado ──────────────────────────────────────
@@ -320,7 +392,7 @@ impl Renderer {
                                     contenido = nuevo;
 
                                     // Sincronizar secciones de plugin en el layout
-                                    sincronizar_secciones_plugin(&mut layout, &contenido);
+                                    sincronizar_secciones_plugin(&mut layout, &contenido, sidebar_ancho);
 
                                     window.request_redraw();
                                 }
@@ -359,7 +431,7 @@ fn sidebar_ancho_actual(layout: &LayoutManager) -> f32 {
 }
 
 /// Registra en el LayoutManager las secciones declaradas por plugins en ContenidoRender.
-fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &ContenidoRender) {
+fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &ContenidoRender, sidebar_ancho: f32) {
     // Identificar IDs de secciones de plugin actuales en layout (z_order >= 10)
     let ids_actuales: Vec<String> = layout.secciones().iter()
         .filter(|s| s.z_order >= 10)
@@ -386,10 +458,15 @@ fn sincronizar_secciones_plugin(layout: &mut LayoutManager, contenido: &Contenid
             _         => LadoLayout::Izquierda,
         };
         let color_fondo = sec.color_fondo.map(|[r, g, b]| ColorRgba::rgb_u8(r, g, b));
+        let tamano_pref = if sec.id == "sidebar" && lado == LadoLayout::Izquierda {
+            TamanoPref::Fijo(sidebar_ancho)
+        } else {
+            TamanoPref::Fijo(sec.tamano)
+        };
         layout.registrar(SeccionUI {
             id: sec.id.clone(),
             lado,
-            tamano_pref: TamanoPref::Fijo(sec.tamano),
+            tamano_pref,
             visible: true,
             z_order: 10 + i as i32,
             color_fondo,
@@ -631,6 +708,28 @@ fn renderizar_frame(
             quads.agregar_quad(sol.rect, c);
         }
     }
+    if let Some(rect) = layout.rect_seccion("sidebar") {
+        if rect.ancho > 40.0 {
+            // Divider line at the resizable edge
+            let divider = RectPx {
+                x: rect.x + rect.ancho - 2.0,
+                y: rect.y + 12.0,
+                ancho: 2.0,
+                alto: rect.alto - 24.0,
+            };
+            quads.agregar_quad(divider, COLOR_SIDEBAR_DIVIDER);
+
+            // Visual handle in the center
+            let handle = RectPx {
+                x: rect.x + rect.ancho - 9.0,
+                y: rect.y + (rect.alto * 0.5) - 16.0,
+                ancho: 6.0,
+                alto: 32.0,
+            };
+            quads.agregar_quad(handle, COLOR_SIDEBAR_HANDLE);
+        }
+    }
+
     quads.preparar(&gpu.dispositivo, &gpu.cola, ancho, alto);
 
     // 3. Preparar texto
