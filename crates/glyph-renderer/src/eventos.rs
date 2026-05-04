@@ -146,4 +146,7 @@ pub enum EventoEditor {
 
     /// Mostrar/ocultar la sidebar (Ctrl+B)
     ToggleSidebar,
+
+    /// Abrir o cerrar la vista previa Markdown en el navegador (Ctrl+Shift+M)
+    TogglePreviewMarkdown,
 }

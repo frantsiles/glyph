@@ -6,10 +6,12 @@ members = [
     "crates/glyph-lsp",
     "crates/glyph-plugin-host",
     "crates/glyph-plugin-api",
+    "crates/glyph-webview",
     "crates/glyph-app",
     # Plugins oficiales
     "plugins/plugin-theme",
     "plugins/plugin-sidebar",
+    "plugins/plugin-markdown",
     "plugins/plugin-git",
     "plugins/plugin-formatter",
 ]
@@ -81,6 +83,12 @@ pollster     = "0.3"
 # LSP
 tower-lsp    = "0.20"
 lsp-types    = "0.95"
+
+# Markdown → HTML con soporte de diagramas Mermaid
+pulldown-cmark = "0.9"
+
+# Abrir archivos/URLs en la app por defecto del sistema
+open           = "5"
 
 # Utilidades
 uuid         = { version = "1", features = ["v4"] }

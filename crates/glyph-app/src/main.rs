@@ -30,6 +30,7 @@ use glyph_core::{
 use glyph_lsp::{ClienteLsp, Diagnostic, DiagnosticSeverity, Notificacion, Position, Url};
 use glyph_plugin_api;
 use glyph_plugin_host::HostPlugins;
+use glyph_webview::GestorVistas;
 use glyph_renderer::{
     ColorRender, ConfigRenderer, ContenidoRender, CursorRender, DiagnosticoRender,
     DireccionCursor, EventoEditor, LineaSeccionRender, SeccionContenidoRender,
@@ -186,6 +187,9 @@ fn main() -> Result<()> {
     if let Err(e) = host.cargar_lua(plugin_sidebar::NOMBRE, plugin_sidebar::SCRIPT) {
         tracing::warn!("No se pudo cargar plugin-sidebar: {e}");
     }
+    if let Err(e) = host.cargar_lua(plugin_markdown::NOMBRE, plugin_markdown::SCRIPT) {
+        tracing::warn!("No se pudo cargar plugin-markdown: {e}");
+    }
     host.inicializar();
     host.al_abrir(gestor.tab().ruta.as_ref().and_then(|p| p.to_str()));
 
@@ -267,6 +271,9 @@ fn main() -> Result<()> {
 
     // ── Portapapeles del sistema ────────────────────────────────────────
     let mut clipboard = Clipboard::new().ok();
+
+    // ── Gestor de previews HTML en el navegador ─────────────────────────
+    let mut gestor_vistas = GestorVistas::nuevo();
 
     glyph_renderer::ejecutar(config, contenido_inicial, move |evento| {
         // ── Eventos de navegación de tabs ─────────────────────────────────
@@ -425,12 +432,23 @@ fn main() -> Result<()> {
                                     acciones_plugin,
                                     &mut gestor,
                                     &mut host,
+                                    &mut gestor_vistas,
                                     &mut hover_actual,
                                     &diagnosticos_compartidos,
                                     &resaltador,
                                     &tx_lsp,
                                     &version_doc,
                                 );
+                                // Refrescar preview si está abierto y el archivo es Markdown
+                                if matches!(gestor.tab().lenguaje, Lenguaje::Markdown)
+                                    && gestor_vistas.esta_abierta("md_preview")
+                                {
+                                    let titulo = format!("{} — Preview", gestor.tab().nombre);
+                                    let contenido = gestor.tab().documento.buffer.contenido_completo();
+                                    if let Err(e) = gestor_vistas.abrir_o_actualizar("md_preview", &titulo, &contenido) {
+                                        tracing::warn!("Error actualizando preview Markdown: {e}");
+                                    }
+                                }
                             }
                             Err(e) => tracing::error!("Error guardando {}: {e}", ruta.display()),
                         }
@@ -631,6 +649,21 @@ fn main() -> Result<()> {
                     &diagnosticos_compartidos, hover_actual.clone()));
             }
 
+            EventoEditor::TogglePreviewMarkdown => {
+                let id = "md_preview";
+                if gestor_vistas.esta_abierta(id) {
+                    gestor_vistas.cerrar(id);
+                } else {
+                    let titulo = format!("{} — Preview", gestor.tab().nombre);
+                    let contenido = gestor.tab().documento.buffer.contenido_completo();
+                    if let Err(e) = gestor_vistas.abrir_o_actualizar(id, &titulo, &contenido) {
+                        tracing::warn!("Error abriendo preview Markdown: {e}");
+                    }
+                }
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
+            }
+
             // ── Navegación en secciones de plugin ──────────────────────
             EventoEditor::NavegacionSeccion { id_seccion, direccion } => {
                 // Convertir DireccionCursor a DireccionNavegacion
@@ -681,6 +714,7 @@ fn main() -> Result<()> {
                     acciones_plugin,
                     &mut gestor,
                     &mut host,
+                    &mut gestor_vistas,
                     &mut hover_actual,
                     &diagnosticos_compartidos,
                     &resaltador,
@@ -869,6 +903,7 @@ fn procesar_acciones_plugin(
     acciones: Vec<glyph_plugin_api::AccionPlugin>,
     gestor: &mut GestorTabs,
     host: &mut HostPlugins,
+    gestor_vistas: &mut GestorVistas,
     hover_actual: &mut Option<String>,
     diagnosticos: &Arc<Mutex<Vec<Diagnostic>>>,
     resaltador: &Resaltador,
@@ -908,6 +943,7 @@ fn procesar_acciones_plugin(
                             acciones_siguientes,
                             gestor,
                             host,
+                            gestor_vistas,
                             hover_actual,
                             diagnosticos,
                             resaltador,
@@ -923,6 +959,18 @@ fn procesar_acciones_plugin(
             glyph_plugin_api::AccionPlugin::EstablecerLenguajeBuffer(nombre) => {
                 gestor.tab_mut().lenguaje =
                     glyph_core::resaltado::Lenguaje::desde_nombre(&nombre);
+            }
+            glyph_plugin_api::AccionPlugin::ToggleVistaPreviaMd => {
+                let id = "md_preview";
+                if gestor_vistas.esta_abierta(id) {
+                    gestor_vistas.cerrar(id);
+                } else {
+                    let titulo = format!("{} — Preview", gestor.tab().nombre);
+                    let contenido = gestor.tab().documento.buffer.contenido_completo();
+                    if let Err(e) = gestor_vistas.abrir_o_actualizar(id, &titulo, &contenido) {
+                        tracing::warn!("Error abriendo preview Markdown: {e}");
+                    }
+                }
             }
             _ => {}
         }

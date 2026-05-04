@@ -379,6 +379,11 @@ impl HostPlugins {
                 // El host no controla el buffer — pasa la acción a la app.
                 Some(AccionPlugin::EstablecerLenguajeBuffer(lenguaje))
             }
+
+            AccionPlugin::ToggleVistaPreviaMd => {
+                // El host no controla la ventana del navegador — pasa la acción a la app.
+                Some(AccionPlugin::ToggleVistaPreviaMd)
+            }
         }
     }
 }

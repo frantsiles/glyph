@@ -1,0 +1,11 @@
+[package]
+name        = "plugin-markdown"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Plugin oficial de preview Markdown con soporte Mermaid — Glyph"
+
+[dependencies]

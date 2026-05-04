@@ -634,6 +634,7 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
                 "t" | "T" => Some(EventoEditor::NuevoTab),
                 "w" | "W" => Some(EventoEditor::CerrarTab),
                 "b" | "B" => Some(EventoEditor::ToggleSidebar),
+                "m" | "M" => if mods.shift_key() { Some(EventoEditor::TogglePreviewMarkdown) } else { None },
                 _ => None,
             },
             Key::Named(NamedKey::Tab) => {

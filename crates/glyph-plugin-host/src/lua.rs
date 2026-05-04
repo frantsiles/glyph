@@ -272,6 +272,16 @@ fn inyectar_global_glyph(lua: &Lua) -> anyhow::Result<()> {
     })?;
     glyph.set("leer_directorio", leer_dir_fn)?;
 
+    // glyph.toggle_preview_md()
+    let toggle_md_fn = lua.create_function(|lua_ctx, ()| {
+        let pending: Table = lua_ctx.globals().get("_glyph_pending")?;
+        let accion = lua_ctx.create_table()?;
+        accion.set("tipo", "toggle_preview_md")?;
+        pending.push(accion)?;
+        Ok(())
+    })?;
+    glyph.set("toggle_preview_md", toggle_md_fn)?;
+
     // glyph.mostrar_notificacion(mensaje, nivel)
     let notificar_fn = lua.create_function(|lua_ctx, (mensaje, nivel): (String, String)| {
         let pending: Table = lua_ctx.globals().get("_glyph_pending")?;
@@ -353,6 +363,9 @@ fn drenar_pending(lua: &Lua, nombre_plugin: &str) -> Vec<AccionPlugin> {
                     _ => NivelNotificacion::Info,
                 };
                 acciones.push(AccionPlugin::MostrarNotificacion { mensaje, nivel });
+            }
+            "toggle_preview_md" => {
+                acciones.push(AccionPlugin::ToggleVistaPreviaMd);
             }
             _ => {
                 tracing::warn!("[plugin '{nombre_plugin}'] acción Lua desconocida: '{tipo}'");

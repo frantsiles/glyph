@@ -228,6 +228,13 @@ pub enum AccionPlugin {
     /// Útil para archivos sin extensión o para forzar un lenguaje diferente.
     /// El `lenguaje` es el nombre en minúsculas (ej. `"cs"`, `"bash"`).
     EstablecerLenguajeBuffer(String),
+
+    // ── M8: Preview externo (Markdown, diagramas) ─────────────────────
+
+    /// Alterna la vista previa del buffer activo en el navegador del sistema.
+    /// Si el buffer es Markdown, abre/actualiza el preview HTML; si ya está
+    /// abierto, lo cierra.
+    ToggleVistaPreviaMd,
 }
 
 // ------------------------------------------------------------------

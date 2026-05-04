@@ -1,0 +1,15 @@
+[package]
+name        = "glyph-webview"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+description = "Renderizado de vistas HTML para previews de Markdown y otros formatos"
+
+[dependencies]
+pulldown-cmark = { workspace = true }
+open           = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
