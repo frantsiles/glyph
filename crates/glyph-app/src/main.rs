@@ -631,6 +631,39 @@ fn main() -> Result<()> {
                     &diagnosticos_compartidos, hover_actual.clone()));
             }
 
+            // ── Navegación en secciones de plugin ──────────────────────
+            EventoEditor::NavegacionSeccion { id_seccion, direccion } => {
+                // Convertir DireccionCursor a DireccionNavegacion
+                let dir_nav = match direccion {
+                    DireccionCursor::Arriba => glyph_plugin_api::DireccionNavegacion::Arriba,
+                    DireccionCursor::Abajo => glyph_plugin_api::DireccionNavegacion::Abajo,
+                    DireccionCursor::Izquierda => glyph_plugin_api::DireccionNavegacion::Izquierda,
+                    DireccionCursor::Derecha => glyph_plugin_api::DireccionNavegacion::Derecha,
+                    DireccionCursor::InicioLinea => glyph_plugin_api::DireccionNavegacion::InicioLinea,
+                    DireccionCursor::FinLinea => glyph_plugin_api::DireccionNavegacion::FinLinea,
+                    DireccionCursor::PaginaArriba => glyph_plugin_api::DireccionNavegacion::PaginaArriba,
+                    DireccionCursor::PaginaAbajo => glyph_plugin_api::DireccionNavegacion::PaginaAbajo,
+                    DireccionCursor::InicioDoc => glyph_plugin_api::DireccionNavegacion::InicioDoc,
+                    DireccionCursor::FinDoc => glyph_plugin_api::DireccionNavegacion::FinDoc,
+                };
+                let acciones = host.navegacion_seccion(&id_seccion, dir_nav);
+                for accion in acciones {
+                    if let glyph_plugin_api::AccionPlugin::AbrirArchivo(ruta) = accion {
+                        abrir_archivo_en_tab(&mut gestor, &ruta, &host, &diagnosticos_compartidos,
+                            &resaltador, &tx_lsp, &mut hover_actual);
+                    }
+                }
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
+            }
+
+            // ── Cambio de foco entre secciones ────────────────────────
+            EventoEditor::CambioFoco(_id_seccion) => {
+                // Solo reconstruir el contenido para reflejar cambios visuales si es necesario
+                return Some(construir_contenido(&gestor, &resaltador, &host,
+                    &diagnosticos_compartidos, hover_actual.clone()));
+            }
+
             // Tab events already handled above
             _ => {}
         }

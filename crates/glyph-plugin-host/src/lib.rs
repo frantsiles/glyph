@@ -27,7 +27,7 @@ mod wasm;
 use std::collections::HashMap;
 use std::path::Path;
 
-use glyph_plugin_api::{AccionPlugin, ContextoPlugin, LineaSeccion, NivelNotificacion, Permisos, Plugin, SeccionConfig};
+use glyph_plugin_api::{AccionPlugin, ContextoPlugin, DireccionNavegacion, LineaSeccion, NivelNotificacion, Permisos, Plugin, SeccionConfig};
 
 use crate::lua::PluginLua;
 use crate::wasm::PluginWasm;
@@ -161,6 +161,47 @@ impl HostPlugins {
         };
         let acciones = self.recoger_acciones(|p| p.al_guardar(&ctx), origen_plugin);
         self.aplicar_acciones(acciones)
+    }
+
+    /// Enruta un evento de navegación de teclado a una sección del plugin.
+    /// Mapea DireccionNavegacion a nombres de teclas (Arrow-Up, ArrowDown, etc.)
+    /// y devuelve las acciones resultantes.
+    pub fn navegacion_seccion(&mut self, id: &str, direccion: DireccionNavegacion) -> Vec<AccionPlugin> {
+        let tecla = match direccion {
+            DireccionNavegacion::Arriba => "ArrowUp",
+            DireccionNavegacion::Abajo => "ArrowDown",
+            DireccionNavegacion::Izquierda => "ArrowLeft",
+            DireccionNavegacion::Derecha => "ArrowRight",
+            DireccionNavegacion::InicioLinea => "Home",
+            DireccionNavegacion::FinLinea => "End",
+            DireccionNavegacion::PaginaArriba => "PageUp",
+            DireccionNavegacion::PaginaAbajo => "PageDown",
+            DireccionNavegacion::InicioDoc => "Home",
+            DireccionNavegacion::FinDoc => "End",
+        };
+
+        let nombre_plugin = match self.secciones.get(id) {
+            Some(s) => s.plugin_nombre.clone(),
+            None => return vec![],
+        };
+
+        let acciones = {
+            let plugin = self.plugins.iter_mut()
+                .find(|p| p.nombre() == nombre_plugin);
+            match plugin {
+                Some(p) => p.tecla_seccion(id, tecla, ""),
+                None => vec![],
+            }
+        };
+
+        // Aplicar las acciones (actualizar estado interno del host)
+        let mut acciones_externas = Vec::new();
+        for accion in acciones {
+            if let Some(externa) = self.aplicar_accion(accion, &nombre_plugin) {
+                acciones_externas.push(externa);
+            }
+        }
+        acciones_externas
     }
 
     /// Enruta un click de sección al plugin propietario.

@@ -79,6 +79,25 @@ impl Permisos {
 }
 
 // ------------------------------------------------------------------
+// Dirección de navegación — para eventos de teclado en secciones
+// ------------------------------------------------------------------
+
+/// Dirección de navegación en una sección de plugin.
+#[derive(Debug, Clone, Copy)]
+pub enum DireccionNavegacion {
+    Arriba,
+    Abajo,
+    Izquierda,
+    Derecha,
+    InicioLinea,  // Home
+    FinLinea,     // End
+    PaginaArriba, // Page Up
+    PaginaAbajo,  // Page Down
+    InicioDoc,    // Ctrl+Home
+    FinDoc,       // Ctrl+End
+}
+
+// ------------------------------------------------------------------
 // Contexto — lo que el plugin recibe en cada hook
 // ------------------------------------------------------------------
 
@@ -241,6 +260,13 @@ pub trait Plugin: Send + 'static {
     /// Se llama cuando el usuario hace click en una sección registrada por este plugin.
     /// `linea` es el índice 0-based de la línea clickeada en `Vec<LineaSeccion>`.
     fn click_seccion(&mut self, _id_seccion: &str, _linea: u32) -> Vec<AccionPlugin> {
+        vec![]
+    }
+
+    /// Se llama cuando el usuario presiona una tecla en una sección registrada por este plugin.
+    /// `tecla` es el nombre de la tecla (ej. "ArrowUp", "Enter").
+    /// `modifiers` es una cadena con modificadores (ej. "Ctrl", "Shift", o "").
+    fn tecla_seccion(&mut self, _id_seccion: &str, _tecla: &str, _modifiers: &str) -> Vec<AccionPlugin> {
         vec![]
     }
 }

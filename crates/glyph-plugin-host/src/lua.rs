@@ -167,6 +167,21 @@ impl Plugin for PluginLua {
         }
         drenar_pending(&self.lua, &self.nombre)
     }
+
+    fn tecla_seccion(&mut self, id_seccion: &str, tecla: &str, modifiers: &str) -> Vec<AccionPlugin> {
+        let Ok(tabla) = self.lua.registry_value::<Table<'_>>(&self.key_modulo) else {
+            return vec![];
+        };
+        let func: Function<'_> = match tabla.get("tecla_seccion") {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+        reset_pending(&self.lua);
+        if let Err(e) = func.call::<_, ()>((id_seccion.to_string(), tecla.to_string(), modifiers.to_string())) {
+            tracing::warn!("[plugin '{}'] error en tecla_seccion: {e}", self.nombre);
+        }
+        drenar_pending(&self.lua, &self.nombre)
+    }
 }
 
 // ------------------------------------------------------------------
