@@ -987,6 +987,7 @@ fn documento_a_contenido(
                 texto: l.texto,
                 color: l.color,
                 negrita: l.negrita,
+                fondo: l.fondo,
             }).collect(),
         })
         .collect();

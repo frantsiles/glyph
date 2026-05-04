@@ -372,9 +372,11 @@ fn tabla_a_lineas(tabla: Table, nombre_plugin: &str) -> Vec<LineaSeccion> {
                 let color: Option<[u8; 3]> = t.get::<_, String>("color").ok()
                     .and_then(|s| hex_a_rgb(&s));
                 let negrita: bool = t.get("negrita").unwrap_or(false);
+                let fondo: Option<[u8; 3]> = t.get::<_, String>("fondo").ok()
+                    .and_then(|s| hex_a_rgb(&s));
                 let payload: Option<Vec<u8>> = t.get::<_, String>("payload").ok()
                     .map(|s| s.into_bytes());
-                lineas.push(LineaSeccion { texto, color, negrita, payload });
+                lineas.push(LineaSeccion { texto, color, negrita, fondo, payload });
             }
             Ok(Value::String(s)) => {
                 lineas.push(LineaSeccion::simple(s.to_str().unwrap_or("")));

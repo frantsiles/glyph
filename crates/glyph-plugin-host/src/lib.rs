@@ -204,8 +204,9 @@ impl HostPlugins {
         acciones_externas
     }
 
-    /// Enruta un click de sección al plugin propietario.
-    /// Devuelve las acciones resultantes (incluidas posibles `AbrirArchivo`).
+    /// Enruta un evento de sección al plugin propietario.
+    /// Si `linea == u32::MAX` es el centinela de teclado Enter → llama `tecla_seccion("Enter")`.
+    /// Para clicks reales llama `click_seccion(linea)`.
     pub fn evento_seccion(&mut self, id: &str, linea: u32) -> Vec<AccionPlugin> {
         let nombre_plugin = match self.secciones.get(id) {
             Some(s) => s.plugin_nombre.clone(),
@@ -216,6 +217,7 @@ impl HostPlugins {
             let plugin = self.plugins.iter_mut()
                 .find(|p| p.nombre() == nombre_plugin);
             match plugin {
+                Some(p) if linea == u32::MAX => p.tecla_seccion(id, "Enter", ""),
                 Some(p) => p.click_seccion(id, linea),
                 None => vec![],
             }
@@ -252,6 +254,7 @@ impl HostPlugins {
                 texto: l.texto.clone(),
                 color: l.color,
                 negrita: l.negrita,
+                fondo: l.fondo,
             }).collect(),
         }).collect()
     }
@@ -371,6 +374,7 @@ pub struct LineaParaRender {
     pub texto: String,
     pub color: Option<[u8; 3]>,
     pub negrita: bool,
+    pub fondo: Option<[u8; 3]>,
 }
 
 pub struct SeccionParaRender {

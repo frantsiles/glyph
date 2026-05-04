@@ -554,6 +554,8 @@ impl RendererTexto {
 
     pub fn ancho_gutter(&self) -> f32 { self.ancho_gutter }
     pub fn scroll_linea(&self) -> i32 { self.scroll_linea }
+    pub fn alto_linea(&self) -> f32 { self.metricas.line_height }
+    pub fn sidebar_scroll(&self) -> i32 { self.sidebar_scroll_linea }
     #[allow(dead_code)]
     pub fn sidebar_ancho(&self) -> f32 { self.sidebar_ancho }
 

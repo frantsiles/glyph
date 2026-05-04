@@ -120,20 +120,22 @@ pub struct ContextoPlugin {
 #[derive(Debug, Clone)]
 pub struct LineaSeccion {
     pub texto: String,
-    /// Color RGB — None usa el color por defecto de la sección.
+    /// Color RGB del texto — None usa el color por defecto de la sección.
     pub color: Option<[u8; 3]>,
     pub negrita: bool,
+    /// Color RGB de fondo de la línea — None usa el fondo de la sección.
+    pub fondo: Option<[u8; 3]>,
     /// Datos opacos devueltos al plugin cuando el usuario hace click en esta línea.
     pub payload: Option<Vec<u8>>,
 }
 
 impl LineaSeccion {
     pub fn simple(texto: impl Into<String>) -> Self {
-        Self { texto: texto.into(), color: None, negrita: false, payload: None }
+        Self { texto: texto.into(), color: None, negrita: false, fondo: None, payload: None }
     }
 
     pub fn con_color(texto: impl Into<String>, color: [u8; 3]) -> Self {
-        Self { texto: texto.into(), color: Some(color), negrita: false, payload: None }
+        Self { texto: texto.into(), color: Some(color), negrita: false, fondo: None, payload: None }
     }
 }
 

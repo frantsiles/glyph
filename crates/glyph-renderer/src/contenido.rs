@@ -73,6 +73,7 @@ pub struct LineaSeccionRender {
     pub texto: String,
     pub color: Option<[u8; 3]>,
     pub negrita: bool,
+    pub fondo: Option<[u8; 3]>,
 }
 
 /// Contenido de una sección registrada por un plugin, lista para renderizar.

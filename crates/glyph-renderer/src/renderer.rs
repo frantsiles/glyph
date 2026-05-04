@@ -660,10 +660,10 @@ fn resolver_evento(key: &Key, text: Option<&str>, mods: ModifiersState, tamano_t
             if es_editor {
                 return Some(EventoEditor::InsertarTexto("\n".to_string()));
             } else {
-                // En otras secciones, Enter emite evento de sección
+                // En secciones de plugin, u32::MAX indica "activar línea enfocada internamente"
                 return Some(EventoEditor::EventoSeccion {
                     id_seccion: seccion_con_foco.to_string(),
-                    linea: 0, // Será interpretado por la sección
+                    linea: u32::MAX,
                 });
             }
         }
@@ -893,6 +893,32 @@ fn renderizar_frame(
                 alto: 32.0,
             };
             quads.agregar_quad(handle, COLOR_SIDEBAR_HANDLE);
+        }
+    }
+
+    // Fondos de líneas individuales de la sidebar (indicador de foco, etc.)
+    // El texto de la sidebar arranca en ALTURA_TABS_PX + 8px dentro del rect,
+    // así que aplicamos el mismo offset de 8px a los quads de fondo.
+    if let Some(rect) = layout.rect_seccion("sidebar") {
+        let line_h = texto.alto_linea();
+        let scroll = texto.sidebar_scroll();
+        const OFFSET_TEXTO: f32 = 8.0;
+        let sidebar_sec = contenido.secciones_plugin.iter().find(|s| s.lado == "izquierda");
+        if let Some(sec) = sidebar_sec {
+            for (i, linea) in sec.lineas.iter().enumerate() {
+                if let Some(fondo) = linea.fondo {
+                    let y_offset = (i as i32 - scroll) as f32 * line_h;
+                    let y = rect.y + OFFSET_TEXTO + y_offset;
+                    if y >= rect.y && y < rect.y + rect.alto {
+                        quads.agregar_quad(RectPx {
+                            x: rect.x,
+                            y,
+                            ancho: rect.ancho - 2.0,
+                            alto: line_h,
+                        }, ColorRgba::rgb_u8(fondo[0], fondo[1], fondo[2]));
+                    }
+                }
+            }
         }
     }
 
