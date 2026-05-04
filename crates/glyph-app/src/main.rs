@@ -159,9 +159,8 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| "Sin título".into());
         let uri = ruta.canonicalize().ok()
             .and_then(|r| Url::from_file_path(r).ok());
-        let lenguaje = Lenguaje::desde_extension(
-            ruta.extension().and_then(|e| e.to_str()).unwrap_or(""),
-        );
+        let ext = ruta.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lenguaje = Lenguaje::desde_extension(ext);
         TabDoc {
             documento: Document::desde_archivo(&contenido_fs, ruta.clone()),
             nombre,
@@ -222,6 +221,7 @@ fn main() -> Result<()> {
     let barra_inicial = construir_barra_estado(
         &gestor.tab().documento,
         Some(&gestor.tab().nombre),
+        gestor.tab().lenguaje,
         false, false, "", "", &[], 0, 0,
     );
 
@@ -786,6 +786,7 @@ fn construir_contenido(
     let barra = construir_barra_estado(
         &tab.documento,
         Some(&tab.nombre),
+        tab.lenguaje,
         tab.en_busqueda,
         tab.en_reemplazo,
         &tab.consulta,
@@ -843,9 +844,12 @@ fn abrir_archivo_en_tab(
         .unwrap_or_else(|| ruta_str.to_string());
     let uri = ruta.canonicalize().ok()
         .and_then(|r| Url::from_file_path(r).ok());
-    let lenguaje = glyph_core::resaltado::Lenguaje::desde_extension(
-        ruta.extension().and_then(|e| e.to_str()).unwrap_or(""),
-    );
+    let ext_str = ruta.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let lenguaje = if let Some(nombre) = _host.lenguaje_para_extension(ext_str) {
+        glyph_core::resaltado::Lenguaje::desde_nombre(nombre)
+    } else {
+        glyph_core::resaltado::Lenguaje::desde_extension(ext_str)
+    };
     let tab = TabDoc {
         documento: glyph_core::Document::desde_archivo(&contenido_fs, ruta.clone()),
         nombre,
@@ -915,6 +919,10 @@ fn procesar_acciones_plugin(
             }
             glyph_plugin_api::AccionPlugin::DecorarLineas(_lineas) => {
                 // Por ahora solo reconocemos la acción; el renderizado se implementará en el siguiente paso.
+            }
+            glyph_plugin_api::AccionPlugin::EstablecerLenguajeBuffer(nombre) => {
+                gestor.tab_mut().lenguaje =
+                    glyph_core::resaltado::Lenguaje::desde_nombre(&nombre);
             }
             _ => {}
         }
@@ -1018,6 +1026,7 @@ fn documento_a_contenido(
 fn construir_barra_estado(
     doc: &Document,
     nombre_archivo: Option<&str>,
+    lenguaje: Lenguaje,
     en_busqueda: bool,
     en_reemplazo: bool,
     consulta: &str,
@@ -1067,7 +1076,7 @@ fn construir_barra_estado(
         } else {
             String::new()
         };
-        format!("{nombre} | Ln {}, Col {}{}{}", pos.linea + 1, pos.columna + 1, sel, errores)
+        format!("{nombre} | {} | Ln {}, Col {}{}{}", lenguaje.nombre_display(), pos.linea + 1, pos.columna + 1, sel, errores)
     }
 }
 

@@ -78,6 +78,9 @@ pub struct HostPlugins {
     secciones: HashMap<String, SeccionRegistrada>,
     /// Rutas de archivos pendientes de abrir en la app
     archivos_pendientes: Vec<String>,
+    /// Mapeos de extensión a nombre de lenguaje registrados por plugins
+    /// Clave: extensión sin punto ("foo"). Valor: nombre de lenguaje ("yaml").
+    mapeos_extension: HashMap<String, String>,
 }
 
 impl HostPlugins {
@@ -88,7 +91,14 @@ impl HostPlugins {
             permisos: HashMap::new(),
             secciones: HashMap::new(),
             archivos_pendientes: Vec::new(),
+            mapeos_extension: HashMap::new(),
         }
+    }
+
+    /// Devuelve el nombre del lenguaje registrado por algún plugin para esta extensión,
+    /// o `None` si ningún plugin ha declarado un mapeo para ella.
+    pub fn lenguaje_para_extension(&self, ext: &str) -> Option<&str> {
+        self.mapeos_extension.get(ext).map(|s| s.as_str())
     }
 
     /// Carga un plugin Lua y lo registra.
@@ -357,6 +367,17 @@ impl HostPlugins {
                 };
                 tracing::info!("[notificacion {nivel_str}] {mensaje}");
                 None
+            }
+
+            AccionPlugin::RegistrarMapeoExtension { extension, lenguaje } => {
+                tracing::info!("['{nombre_plugin}'] extensión .{extension} → {lenguaje}");
+                self.mapeos_extension.insert(extension, lenguaje);
+                None
+            }
+
+            AccionPlugin::EstablecerLenguajeBuffer(lenguaje) => {
+                // El host no controla el buffer — pasa la acción a la app.
+                Some(AccionPlugin::EstablecerLenguajeBuffer(lenguaje))
             }
         }
     }

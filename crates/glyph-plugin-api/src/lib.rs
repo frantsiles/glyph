@@ -215,6 +215,19 @@ pub enum AccionPlugin {
 
     /// Muestra una notificación efímera al usuario.
     MostrarNotificacion { mensaje: String, nivel: NivelNotificacion },
+
+    // ── M7: Detección de lenguaje extensible ──────────────────────────
+
+    /// Registra un mapeo de extensión de archivo a lenguaje.
+    /// Permite a un plugin declarar que `.foo` debe tratarse como `"yaml"`, etc.
+    /// La `extension` no incluye el punto (ej. `"foo"`, no `".foo"`).
+    /// El `lenguaje` es el nombre en minúsculas (ej. `"yaml"`, `"cs"`, `"rust"`).
+    RegistrarMapeoExtension { extension: String, lenguaje: String },
+
+    /// Cambia el lenguaje del buffer activo (override manual).
+    /// Útil para archivos sin extensión o para forzar un lenguaje diferente.
+    /// El `lenguaje` es el nombre en minúsculas (ej. `"cs"`, `"bash"`).
+    EstablecerLenguajeBuffer(String),
 }
 
 // ------------------------------------------------------------------
